@@ -1,14 +1,29 @@
-// Package claude provides goroutine interfaces for automating Claude CLI
-// with concurrent session management and real-time streaming.
+// Package claude provides a Go SDK for automating Claude Code CLI
+// with concurrent session management, real-time streaming, custom tools,
+// and hooks. This is the Go equivalent of the Python Claude Agent SDK.
 //
 // This library enables Go applications to interact with Claude Code CLI
 // programmatically, supporting both single queries and multi-turn conversations
 // with proper session management, file operations, and concurrent execution.
 //
-// # Basic Usage
+// # Quick Start - Simple Query
 //
-//	client := claude.New(&claude.Options{
-//		PermissionMode: "bypassPermissions",
+// For one-shot queries without session management:
+//
+//	messages, err := claude.Query(ctx, "What is 2+2?", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	for _, msg := range messages {
+//		if text := claude.GetText(msg); text != "" {
+//			fmt.Println(text)
+//		}
+//	}
+//
+// # Client-Based Usage
+//
+//	client := claude.New(&claude.AgentOptions{
+//		PermissionMode: claude.PermissionModeBypassPermission,
 //		Interactive:    false, // Use -p mode for simple queries
 //	})
 //	defer client.Close()
@@ -26,8 +41,8 @@
 //
 // # Multi-turn Conversations
 //
-//	client := claude.New(&claude.Options{
-//		PermissionMode: "bypassPermissions",
+//	client := claude.New(&claude.AgentOptions{
+//		PermissionMode: claude.PermissionModeBypassPermission,
 //		Interactive:    true, // Enable session persistence
 //	})
 //
@@ -51,10 +66,84 @@
 //	}
 //	wg.Wait()
 //
+// # Custom Tools (In-Process MCP Servers)
+//
+// Define custom tools that run directly in your Go application:
+//
+//	// Create a tool using the builder pattern
+//	addTool := claude.Tool("add", "Add two numbers").
+//		Param("a", "number", "First number").
+//		Param("b", "number", "Second number").
+//		Required("a", "b").
+//		HandlerFunc(func(ctx context.Context, args map[string]interface{}) (string, error) {
+//			a := args["a"].(float64)
+//			b := args["b"].(float64)
+//			return fmt.Sprintf("%g", a+b), nil
+//		})
+//
+//	// Create an SDK MCP server with your tools
+//	server := claude.CreateSDKMCPServer("calculator", "1.0.0", addTool)
+//
+//	// Register with client
+//	client := claude.New(&claude.AgentOptions{
+//		PermissionMode: claude.PermissionModeBypassPermission,
+//		AllowedTools:   []string{"mcp__calculator__add"},
+//	})
+//	client.RegisterSDKMCPServer("calculator", server)
+//
+// # Hooks
+//
+// Intercept and control tool execution with hooks:
+//
+//	// Create a hook to block dangerous commands
+//	bashBlocker := func(ctx context.Context, input claude.HookInput, toolUseID string, hookCtx claude.HookContext) (*claude.HookOutput, error) {
+//		if preInput, ok := input.(claude.PreToolUseInput); ok {
+//			if cmd, ok := preInput.ToolInput["command"].(string); ok {
+//				if strings.Contains(cmd, "rm -rf") {
+//					return &claude.HookOutput{
+//						PermissionDecision: claude.PermissionBehaviorDeny,
+//						PermissionDecisionReason: "Dangerous command blocked",
+//					}, nil
+//				}
+//			}
+//		}
+//		return nil, nil
+//	}
+//
+//	registry := claude.NewHookRegistry()
+//	registry.Register(claude.HookEventPreToolUse, []claude.HookMatcher{
+//		{Matcher: "Bash", Hooks: []claude.HookCallback{bashBlocker}},
+//	})
+//
+//	client := claude.New(&claude.AgentOptions{
+//		Hooks: registry,
+//	})
+//
+// # Structured Message Types
+//
+// The SDK provides typed messages for parsing CLI JSON output:
+//
+//	// Parse JSON stream messages
+//	msg, err := claude.ParseMessage(jsonData)
+//
+//	switch m := msg.(type) {
+//	case claude.AssistantMessage:
+//		for _, block := range m.Content {
+//			switch b := block.(type) {
+//			case claude.TextBlock:
+//				fmt.Println(b.Text)
+//			case claude.ToolUseBlock:
+//				fmt.Printf("Tool: %s\n", b.Name)
+//			}
+//		}
+//	case claude.ResultMessage:
+//		fmt.Printf("Cost: $%.4f\n", m.TotalCostUSD)
+//	}
+//
 // # File Operations
 //
-//	client := claude.New(&claude.Options{
-//		PermissionMode:   "bypassPermissions",
+//	client := claude.New(&claude.AgentOptions{
+//		PermissionMode:   claude.PermissionModeBypassPermission,
 //		Interactive:      true,
 //		WorkingDirectory: "/path/to/project",
 //		AddDirectories:   []string{"/path/to/project"},
@@ -64,41 +153,67 @@
 //		Prompt: "Create a file called main.go with a hello world program",
 //	})
 //
-// # Configuration Options
+// # Configuration Options (AgentOptions)
 //
-// The Options struct provides extensive configuration:
+// The AgentOptions struct provides extensive configuration matching
+// the Python SDK's ClaudeAgentOptions:
 //
 //   - Model: Specify Claude model ("sonnet", "opus", etc.)
+//   - MaxTurns: Maximum conversation turns
+//   - MaxThinkingTokens: Maximum tokens for thinking
+//   - MaxBudgetUSD: Maximum cost budget
+//   - SystemPrompt: Custom system prompt
 //   - Interactive: Enable persistent sessions vs single queries
 //   - PermissionMode: Control Claude's permission level
 //   - WorkingDirectory: Set working directory for Claude process
 //   - AddDirectories: Grant access to additional directories
 //   - AllowedTools/DisallowedTools: Control tool usage
+//   - MCPServers: Configure MCP servers
+//   - Hooks: Register hook callbacks
+//   - Sandbox: Configure sandbox settings
+//   - Resume/ContinueConversation: Session continuation
 //   - Environment: Set environment variables for Claude process
+//   - CLIPath: Custom path to Claude CLI
 //
 // # Error Handling
 //
+// The SDK provides typed errors for precise error handling:
+//
 //	resp, err := client.Query(ctx, req)
 //	if err != nil {
-//		// Handle creation/startup errors
-//		log.Fatal(err)
+//		switch {
+//		case claude.IsCLINotFound(err):
+//			log.Fatal("Install Claude CLI: npm install -g @anthropic-ai/claude-code")
+//		case claude.IsProcessError(err):
+//			log.Fatal("CLI process failed")
+//		default:
+//			log.Fatal(err)
+//		}
 //	}
 //
-//	go func() {
-//		for err := range resp.Errors {
-//			// Handle runtime errors from Claude process
-//			log.Printf("Claude error: %v", err)
-//		}
-//	}()
-//
-//	for msg := range resp.Messages {
-//		if msg.Error != "" {
-//			// Handle message-level errors
-//			log.Printf("Message error: %s", msg.Error)
-//			continue
-//		}
-//		// Process successful message
+//	// Runtime errors
+//	for err := range resp.Errors {
+//		log.Printf("Claude error: %v", err)
 //	}
+//
+// Error types include:
+//   - ClaudeSDKError: Base error type
+//   - CLINotFoundError: Claude CLI not installed
+//   - CLIConnectionError: Connection issues
+//   - ProcessError: CLI process failures
+//   - CLIJSONDecodeError: JSON parsing errors
+//   - MessageParseError: Message parsing errors
+//   - SessionClosedError: Using a closed session
+//   - ToolError: Tool execution failures
+//   - HookError: Hook execution failures
+//
+// # CLI Discovery
+//
+// The SDK automatically finds the Claude CLI in this order:
+//  1. CLAUDE_CLI_PATH environment variable
+//  2. Current working directory
+//  3. System PATH
+//  4. Common installation locations (npm, yarn, homebrew)
 //
 // # Thread Safety
 //

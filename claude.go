@@ -14,28 +14,116 @@ import (
 	"github.com/google/uuid"
 )
 
+// SandboxNetworkConfig configures network access in sandbox mode.
+type SandboxNetworkConfig struct {
+	UnixSockets  []string `json:"unix_sockets,omitempty"`
+	LocalBinding bool     `json:"local_binding,omitempty"`
+	ProxyPorts   []int    `json:"proxy_ports,omitempty"`
+}
+
+// SandboxIgnoreViolations configures violations to ignore in sandbox mode.
+type SandboxIgnoreViolations struct {
+	FilePaths    []string `json:"file_paths,omitempty"`
+	NetworkHosts []string `json:"network_hosts,omitempty"`
+}
+
+// SandboxSettings configures sandbox behavior.
+type SandboxSettings struct {
+	Enabled          bool                     `json:"enabled,omitempty"`
+	AutoApprove      bool                     `json:"auto_approve,omitempty"`
+	ExcludedCommands []string                 `json:"excluded_commands,omitempty"`
+	Network          *SandboxNetworkConfig    `json:"network,omitempty"`
+	IgnoreViolations *SandboxIgnoreViolations `json:"ignore_violations,omitempty"`
+}
+
+// AgentDefinition defines a custom agent.
+type AgentDefinition struct {
+	Description string   `json:"description"`
+	Prompt      string   `json:"prompt"`
+	Tools       []string `json:"tools,omitempty"`
+	Model       string   `json:"model,omitempty"`
+}
+
+// SDKPluginConfig defines a local SDK plugin.
+type SDKPluginConfig struct {
+	Type     string `json:"type"` // Always "local"
+	FilePath string `json:"file_path"`
+}
+
+// AgentOptions provides comprehensive configuration for Claude agents.
+// This is the Go equivalent of Python's ClaudeAgentOptions.
+type AgentOptions struct {
+	// Model configuration
+	Model             string `json:"model,omitempty"`
+	MaxThinkingTokens int    `json:"max_thinking_tokens,omitempty"`
+
+	// System prompt
+	SystemPrompt string `json:"system_prompt,omitempty"`
+
+	// Tool configuration
+	AllowedTools    []string `json:"allowed_tools,omitempty"`
+	DisallowedTools []string `json:"disallowed_tools,omitempty"`
+
+	// Permission handling
+	PermissionMode PermissionMode `json:"permission_mode,omitempty"`
+
+	// Resource limits
+	MaxTurns     int     `json:"max_turns,omitempty"`
+	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
+
+	// Session management
+	Resume               string `json:"resume,omitempty"`
+	ContinueConversation bool   `json:"continue_conversation,omitempty"`
+	ForkSession          string `json:"fork_session,omitempty"`
+
+	// MCP servers
+	MCPServers    MCPServers `json:"-"`
+	MCPConfigPath string     `json:"mcp_config,omitempty"`
+
+	// Hooks
+	Hooks *HookRegistry `json:"-"`
+
+	// Plugins
+	Plugins map[string]SDKPluginConfig `json:"plugins,omitempty"`
+
+	// Agent definitions
+	Agents map[string]AgentDefinition `json:"agents,omitempty"`
+
+	// Sandbox settings
+	Sandbox *SandboxSettings `json:"sandbox,omitempty"`
+
+	// File management
+	FileCheckpoints  bool     `json:"file_checkpoints,omitempty"`
+	AddDirectories   []string `json:"add_directories,omitempty"`
+	WorkingDirectory string   `json:"working_directory,omitempty"`
+
+	// Environment variables
+	Environment map[string]string `json:"environment,omitempty"`
+
+	// CLI configuration
+	CLIPath string `json:"cli_path,omitempty"`
+
+	// Debug options
+	Debug   bool `json:"debug,omitempty"`
+	Verbose bool `json:"verbose,omitempty"`
+
+	// Legacy: Interactive mode (for backward compatibility)
+	Interactive bool `json:"interactive,omitempty"`
+}
+
+// Options is an alias for backward compatibility.
+// Deprecated: Use AgentOptions instead.
+type Options = AgentOptions
+
+// Client manages Claude sessions and queries.
 type Client struct {
 	mu          sync.RWMutex
 	sessions    map[string]*Session
-	defaultOpts *Options
+	defaultOpts *AgentOptions
+	mcpManager  *MCPServerManager
 }
 
-type Options struct {
-	Model            string            `json:"model,omitempty"`
-	MaxTurns         int               `json:"max_turns,omitempty"`
-	Debug            bool              `json:"debug,omitempty"`
-	Verbose          bool              `json:"verbose,omitempty"`
-	PermissionMode   string            `json:"permission_mode,omitempty"`
-	AllowedTools     []string          `json:"allowed_tools,omitempty"`
-	DisallowedTools  []string          `json:"disallowed_tools,omitempty"`
-	SystemPrompt     string            `json:"system_prompt,omitempty"`
-	MCPConfig        string            `json:"mcp_config,omitempty"`
-	AddDirectories   []string          `json:"add_directories,omitempty"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	WorkingDirectory string            `json:"working_directory,omitempty"`
-	Interactive      bool              `json:"interactive,omitempty"` // Use interactive mode instead of -p
-}
-
+// Session represents an active Claude CLI session.
 type Session struct {
 	ID       string
 	client   *Client
@@ -45,13 +133,15 @@ type Session struct {
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
-	options  *Options
+	options  *AgentOptions
 	messages chan *Message
 	errors   chan error
 	closed   bool
 	mu       sync.RWMutex
 }
 
+// Message represents a streaming message from Claude.
+// For structured messages, use the typed message types (AssistantMessage, etc.)
 type Message struct {
 	Type      string          `json:"type"`
 	Content   string          `json:"content,omitempty"`
@@ -61,34 +151,58 @@ type Message struct {
 	Error     string          `json:"error,omitempty"`
 }
 
+// QueryRequest defines the input for a query.
 type QueryRequest struct {
-	Prompt    string   `json:"prompt"`
-	Options   *Options `json:"options,omitempty"`
-	SessionID string   `json:"session_id,omitempty"`
+	Prompt    string        `json:"prompt"`
+	Options   *AgentOptions `json:"options,omitempty"`
+	SessionID string        `json:"session_id,omitempty"`
 }
 
+// QueryResponse provides channels for receiving query results.
 type QueryResponse struct {
 	SessionID string        `json:"session_id"`
 	Messages  chan *Message `json:"-"`
 	Errors    chan error    `json:"-"`
 }
 
-func New(opts *Options) *Client {
+// New creates a new Client with the given options.
+func New(opts *AgentOptions) *Client {
 	if opts == nil {
-		opts = &Options{
-			PermissionMode: "bypassPermissions",
+		opts = &AgentOptions{
+			PermissionMode: PermissionModeBypassPermission,
 			Debug:          false,
 			Verbose:        false,
-			Interactive:    true, // Default to interactive mode for multi-turn support
+			Interactive:    true,
 		}
 	}
 
-	return &Client{
+	client := &Client{
 		sessions:    make(map[string]*Session),
 		defaultOpts: opts,
+		mcpManager:  NewMCPServerManager(),
 	}
+
+	// Register MCP servers from options
+	if opts.MCPServers != nil {
+		for name, config := range opts.MCPServers {
+			client.mcpManager.Register(name, config)
+		}
+	}
+
+	return client
 }
 
+// RegisterMCPServer registers an MCP server with the client.
+func (c *Client) RegisterMCPServer(name string, config MCPServerConfig) {
+	c.mcpManager.Register(name, config)
+}
+
+// RegisterSDKMCPServer registers an in-process MCP server.
+func (c *Client) RegisterSDKMCPServer(name string, server *SDKMCPServer) {
+	c.mcpManager.RegisterSDKServer(name, server)
+}
+
+// Query sends a prompt to Claude and returns a response channel.
 func (c *Client) Query(ctx context.Context, req *QueryRequest) (*QueryResponse, error) {
 	sessionID := req.SessionID
 	if sessionID == "" {
@@ -118,6 +232,7 @@ func (c *Client) Query(ctx context.Context, req *QueryRequest) (*QueryResponse, 
 	}, nil
 }
 
+// GetSession retrieves an active session by ID.
 func (c *Client) GetSession(sessionID string) (*Session, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -125,6 +240,7 @@ func (c *Client) GetSession(sessionID string) (*Session, bool) {
 	return session, exists
 }
 
+// CloseSession closes a specific session.
 func (c *Client) CloseSession(sessionID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -138,6 +254,7 @@ func (c *Client) CloseSession(sessionID string) error {
 	return fmt.Errorf("session %s not found", sessionID)
 }
 
+// Close closes all sessions and cleans up resources.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -150,7 +267,7 @@ func (c *Client) Close() error {
 	return nil
 }
 
-func (c *Client) createSession(ctx context.Context, sessionID string, opts *Options) (*Session, error) {
+func (c *Client) createSession(ctx context.Context, sessionID string, opts *AgentOptions) (*Session, error) {
 	sessionCtx, cancel := context.WithCancel(ctx)
 
 	args := c.buildArgs(opts)
@@ -160,31 +277,43 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Opti
 		args = append(args, "--session-id", sessionID)
 	}
 
-	cmd := exec.CommandContext(sessionCtx, "claude", args...)
+	// Find CLI
+	cliPath := opts.CLIPath
+	if cliPath == "" {
+		var err error
+		cliPath, err = FindCLI()
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	}
+
+	cmd := exec.CommandContext(sessionCtx, cliPath, args...)
 
 	if opts.WorkingDirectory != "" {
 		cmd.Dir = opts.WorkingDirectory
 	}
 
+	env := cmd.Environ()
+	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	if opts.Environment != nil {
-		env := cmd.Environ()
 		for k, v := range opts.Environment {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
 		}
-		cmd.Env = env
 	}
+	cmd.Env = env
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)
+		return nil, NewCLIConnectionError("failed to create stdin pipe", err)
 	}
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cancel()
 		stdin.Close()
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+		return nil, NewCLIConnectionError("failed to create stdout pipe", err)
 	}
 
 	stderr, err := cmd.StderrPipe()
@@ -192,7 +321,7 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Opti
 		cancel()
 		stdin.Close()
 		stdout.Close()
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+		return nil, NewCLIConnectionError("failed to create stderr pipe", err)
 	}
 
 	if err := cmd.Start(); err != nil {
@@ -200,7 +329,7 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Opti
 		stdin.Close()
 		stdout.Close()
 		stderr.Close()
-		return nil, fmt.Errorf("failed to start claude command: %w", err)
+		return nil, NewCLIConnectionError("failed to start Claude CLI", err)
 	}
 
 	session := &Session{
@@ -225,8 +354,8 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Opti
 	return session, nil
 }
 
-func (c *Client) mergeOptions(opts *Options) *Options {
-	merged := &Options{}
+func (c *Client) mergeOptions(opts *AgentOptions) *AgentOptions {
+	merged := &AgentOptions{}
 
 	if c.defaultOpts != nil {
 		*merged = *c.defaultOpts
@@ -238,6 +367,12 @@ func (c *Client) mergeOptions(opts *Options) *Options {
 		}
 		if opts.MaxTurns > 0 {
 			merged.MaxTurns = opts.MaxTurns
+		}
+		if opts.MaxThinkingTokens > 0 {
+			merged.MaxThinkingTokens = opts.MaxThinkingTokens
+		}
+		if opts.MaxBudgetUSD > 0 {
+			merged.MaxBudgetUSD = opts.MaxBudgetUSD
 		}
 		if opts.Debug {
 			merged.Debug = opts.Debug
@@ -257,8 +392,8 @@ func (c *Client) mergeOptions(opts *Options) *Options {
 		if opts.SystemPrompt != "" {
 			merged.SystemPrompt = opts.SystemPrompt
 		}
-		if opts.MCPConfig != "" {
-			merged.MCPConfig = opts.MCPConfig
+		if opts.MCPConfigPath != "" {
+			merged.MCPConfigPath = opts.MCPConfigPath
 		}
 		if len(opts.AddDirectories) > 0 {
 			merged.AddDirectories = opts.AddDirectories
@@ -274,17 +409,46 @@ func (c *Client) mergeOptions(opts *Options) *Options {
 		if opts.WorkingDirectory != "" {
 			merged.WorkingDirectory = opts.WorkingDirectory
 		}
+		if opts.CLIPath != "" {
+			merged.CLIPath = opts.CLIPath
+		}
+		if opts.Resume != "" {
+			merged.Resume = opts.Resume
+		}
+		if opts.ContinueConversation {
+			merged.ContinueConversation = opts.ContinueConversation
+		}
+		if opts.ForkSession != "" {
+			merged.ForkSession = opts.ForkSession
+		}
+		if opts.Sandbox != nil {
+			merged.Sandbox = opts.Sandbox
+		}
+		if opts.FileCheckpoints {
+			merged.FileCheckpoints = opts.FileCheckpoints
+		}
+		if opts.Hooks != nil {
+			merged.Hooks = opts.Hooks
+		}
+		if opts.MCPServers != nil {
+			merged.MCPServers = opts.MCPServers
+		}
+		if opts.Plugins != nil {
+			merged.Plugins = opts.Plugins
+		}
+		if opts.Agents != nil {
+			merged.Agents = opts.Agents
+		}
 	}
 
 	return merged
 }
 
-func (c *Client) buildArgs(opts *Options) []string {
+func (c *Client) buildArgs(opts *AgentOptions) []string {
 	var args []string
 
 	if opts.Interactive {
 		args = []string{"--dangerously-skip-permissions"}
-		// Don't use -p for interactive mode
 	} else {
 		args = []string{
 			"-p",
@@ -304,12 +468,17 @@ func (c *Client) buildArgs(opts *Options) []string {
 		args = append(args, "--model", opts.Model)
 	}
 
-	if opts.PermissionMode != "" {
-		args = append(args, "--permission-mode", opts.PermissionMode)
+	if opts.PermissionMode != "" && opts.PermissionMode != PermissionModeBypassPermission {
+		args = append(args, "--permission-mode", string(opts.PermissionMode))
 	}
 
 	if len(opts.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(opts.AllowedTools, ","))
+		// Include SDK MCP tools
+		tools := opts.AllowedTools
+		if c.mcpManager != nil {
+			tools = append(tools, c.mcpManager.AllowedToolNames()...)
+		}
+		args = append(args, "--allowedTools", strings.Join(tools, ","))
 	}
 
 	if len(opts.DisallowedTools) > 0 {
@@ -320,14 +489,30 @@ func (c *Client) buildArgs(opts *Options) []string {
 		args = append(args, "--append-system-prompt", opts.SystemPrompt)
 	}
 
-	if opts.MCPConfig != "" {
-		args = append(args, "--mcp-config", opts.MCPConfig)
+	if opts.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", opts.MCPConfigPath)
 	}
 
 	if len(opts.AddDirectories) > 0 {
 		for _, dir := range opts.AddDirectories {
 			args = append(args, "--add-dir", dir)
 		}
+	}
+
+	if opts.MaxTurns > 0 {
+		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
+	}
+
+	if opts.MaxThinkingTokens > 0 {
+		args = append(args, "--max-thinking-tokens", fmt.Sprintf("%d", opts.MaxThinkingTokens))
+	}
+
+	if opts.Resume != "" {
+		args = append(args, "--resume", opts.Resume)
+	}
+
+	if opts.ContinueConversation {
+		args = append(args, "--continue")
 	}
 
 	return args
@@ -338,18 +523,18 @@ func (s *Session) sendPrompt(prompt string) error {
 	defer s.mu.RUnlock()
 
 	if s.closed {
-		return fmt.Errorf("session is closed")
+		return NewSessionClosedError(s.ID)
 	}
 
-	// For simple -p mode, just write the prompt directly
 	_, err := s.stdin.Write([]byte(prompt + "\n"))
 	if err != nil {
-		return fmt.Errorf("failed to write prompt: %w", err)
+		return NewCLIConnectionError("failed to write prompt", err)
 	}
 
 	return nil
 }
 
+// SendMessage sends a follow-up message in the session.
 func (s *Session) SendMessage(content string) error {
 	return s.sendPrompt(content)
 }
@@ -385,19 +570,9 @@ func (s *Session) handleStdout() {
 			continue
 		}
 
-		// Temporarily show all output for debugging
-		// if strings.HasPrefix(line, "[DEBUG]") ||
-		//    strings.HasPrefix(line, "[ERROR]") ||
-		//    strings.HasPrefix(line, "[MCP]") ||
-		//    strings.HasPrefix(line, "Error:") ||
-		//    strings.TrimSpace(line) == "" {
-		//	continue
-		// }
-
 		contentBuffer.WriteString(line)
 		contentBuffer.WriteString("\n")
 
-		// Send incremental content for each meaningful line
 		msg := Message{
 			Type:      "content",
 			Content:   line,
@@ -412,7 +587,6 @@ func (s *Session) handleStdout() {
 		}
 	}
 
-	// Send final accumulated content if we got any messages
 	if contentBuffer.Len() > 0 && messagesSent {
 		finalMsg := Message{
 			Type:      "final",
@@ -428,7 +602,7 @@ func (s *Session) handleStdout() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		s.errors <- fmt.Errorf("stdout scanner error: %w", err)
+		s.errors <- NewCLIConnectionError("stdout scanner error", err)
 	}
 }
 
@@ -449,10 +623,11 @@ func (s *Session) handleStderr() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		s.errors <- fmt.Errorf("stderr scanner error: %w", err)
+		s.errors <- NewCLIConnectionError("stderr scanner error", err)
 	}
 }
 
+// Close closes the session and releases resources.
 func (s *Session) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -476,9 +651,175 @@ func (s *Session) Close() error {
 	return nil
 }
 
+// Wait waits for the session to complete.
 func (s *Session) Wait() error {
 	if s.cmd == nil {
-		return fmt.Errorf("no command to wait for")
+		return NewSessionClosedError(s.ID)
 	}
 	return s.cmd.Wait()
+}
+
+// Query is a simple function for one-shot queries.
+// It creates a client, sends the prompt, collects all messages, and returns them.
+func Query(ctx context.Context, prompt string, opts *AgentOptions) ([]MessageType, error) {
+	if opts == nil {
+		opts = &AgentOptions{
+			PermissionMode: PermissionModeBypassPermission,
+			Interactive:    false, // Non-interactive for one-shot queries
+		}
+	} else if !opts.Interactive {
+		// Ensure non-interactive mode for one-shot queries
+		optsCopy := *opts
+		optsCopy.Interactive = false
+		opts = &optsCopy
+	}
+
+	// Create transport
+	transportOpts := &SubprocessTransportOptions{
+		CLIPath:    opts.CLIPath,
+		Args:       BuildCLIArgs(opts),
+		Env:        opts.Environment,
+		WorkingDir: opts.WorkingDirectory,
+	}
+
+	transport, err := NewSubprocessTransport(transportOpts)
+	if err != nil {
+		return nil, err
+	}
+	defer transport.Close()
+
+	// Connect
+	if err := transport.Connect(ctx); err != nil {
+		return nil, err
+	}
+
+	// Send prompt
+	if err := transport.Send([]byte(prompt)); err != nil {
+		return nil, err
+	}
+
+	// Close stdin to signal end of input
+	transport.stdin.Close()
+
+	// Parse messages
+	parser := NewStreamParser()
+	go parser.Parse(ctx, transport)
+
+	var messages []MessageType
+	for {
+		select {
+		case <-ctx.Done():
+			return messages, ctx.Err()
+		case msg, ok := <-parser.Messages():
+			if !ok {
+				return messages, nil
+			}
+			messages = append(messages, msg)
+			// Stop on ResultMessage
+			if _, isResult := msg.(ResultMessage); isResult {
+				return messages, nil
+			}
+		case err, ok := <-parser.Errors():
+			if ok && err != nil {
+				return messages, err
+			}
+		}
+	}
+}
+
+// QueryIterator returns an iterator for streaming messages from a one-shot query.
+type QueryIterator struct {
+	transport *SubprocessTransport
+	parser    *StreamParser
+	ctx       context.Context
+	cancel    context.CancelFunc
+	started   bool
+}
+
+// NewQueryIterator creates a new query iterator.
+func NewQueryIterator(ctx context.Context, prompt string, opts *AgentOptions) (*QueryIterator, error) {
+	if opts == nil {
+		opts = &AgentOptions{
+			PermissionMode: PermissionModeBypassPermission,
+			Interactive:    false,
+		}
+	}
+
+	iterCtx, cancel := context.WithCancel(ctx)
+
+	transportOpts := &SubprocessTransportOptions{
+		CLIPath:    opts.CLIPath,
+		Args:       BuildCLIArgs(opts),
+		Env:        opts.Environment,
+		WorkingDir: opts.WorkingDirectory,
+	}
+
+	transport, err := NewSubprocessTransport(transportOpts)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	if err := transport.Connect(iterCtx); err != nil {
+		transport.Close()
+		cancel()
+		return nil, err
+	}
+
+	if err := transport.Send([]byte(prompt)); err != nil {
+		transport.Close()
+		cancel()
+		return nil, err
+	}
+
+	// Close stdin to signal end of input
+	transport.stdin.Close()
+
+	parser := NewStreamParser()
+	go parser.Parse(iterCtx, transport)
+
+	return &QueryIterator{
+		transport: transport,
+		parser:    parser,
+		ctx:       iterCtx,
+		cancel:    cancel,
+		started:   true,
+	}, nil
+}
+
+// Next returns the next message or nil if done.
+func (q *QueryIterator) Next() (MessageType, error) {
+	select {
+	case <-q.ctx.Done():
+		return nil, q.ctx.Err()
+	case msg, ok := <-q.parser.Messages():
+		if !ok {
+			return nil, nil
+		}
+		return msg, nil
+	case err, ok := <-q.parser.Errors():
+		if ok && err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+}
+
+// Close closes the iterator and releases resources.
+func (q *QueryIterator) Close() error {
+	q.cancel()
+	if q.transport != nil {
+		return q.transport.Close()
+	}
+	return nil
+}
+
+// Messages returns a channel for receiving messages.
+func (q *QueryIterator) Messages() <-chan MessageType {
+	return q.parser.Messages()
+}
+
+// Errors returns a channel for receiving errors.
+func (q *QueryIterator) Errors() <-chan error {
+	return q.parser.Errors()
 }
