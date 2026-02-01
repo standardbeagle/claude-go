@@ -1,0 +1,15 @@
+version: 2
+interactions:
+- request:
+    method: POST
+    url: https://api.minimax.chat/v1/openai/chat/completions
+    body: '{"model":"minimax-abab6.5-chat","messages":[{"role":"user","content":"Create a test file with content '\''Hello from integration test!'\''"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"minimax-file-123","object":"chat.completion","created":1234567890,"model":"minimax-abab6.5-chat","choices":[{"index":0,"message":{"role":"assistant","content":"I have created the test file with the content '\''Hello from integration test!'\''."},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":20,"total_tokens":35}}'
+    headers:
+      content-type:
+      - application/json

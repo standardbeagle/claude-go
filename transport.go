@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/creack/pty"
 )
 
 // Transport defines the interface for communicating with Claude.
@@ -46,6 +48,7 @@ type SubprocessTransport struct {
 	workingDir string
 
 	cmd      *exec.Cmd
+	pty      *os.File
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
@@ -60,11 +63,13 @@ type SubprocessTransport struct {
 
 // SubprocessTransportOptions configures a subprocess transport.
 type SubprocessTransportOptions struct {
-	CLIPath    string
-	Args       []string
-	Env        map[string]string
-	WorkingDir string
-	BufferSize int
+	CLIPath      string
+	Args         []string
+	Env          map[string]string // Legacy: use AgentOptions instead
+	EnvList      []string          // Pre-built environment list (takes precedence)
+	AgentOptions *AgentOptions     // Full options for environment building
+	WorkingDir   string
+	BufferSize   int
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -89,13 +94,20 @@ func NewSubprocessTransport(opts *SubprocessTransportOptions) (*SubprocessTransp
 		}
 	}
 
-	// Build environment
-	env := os.Environ()
-	for k, v := range opts.Env {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
+	// Build environment (priority: EnvList > AgentOptions > Env map)
+	var env []string
+	if len(opts.EnvList) > 0 {
+		env = opts.EnvList
+	} else if opts.AgentOptions != nil {
+		env = BuildCLIEnv(opts.AgentOptions)
+	} else {
+		env = os.Environ()
+		for k, v := range opts.Env {
+			env = append(env, fmt.Sprintf("%s=%s", k, v))
+		}
+		// Set SDK entrypoint identifier
+		env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 	}
-	// Set SDK entrypoint identifier
-	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
 
 	bufferSize := opts.BufferSize
 	if bufferSize <= 0 {
@@ -128,37 +140,29 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 		t.cmd.Dir = t.workingDir
 	}
 
+	// Start the command with a PTY
 	var err error
-	t.stdin, err = t.cmd.StdinPipe()
+	t.pty, err = pty.Start(t.cmd)
 	if err != nil {
-		return NewCLIConnectionError("failed to create stdin pipe", err)
+		return NewCLIConnectionError("failed to start CLI with PTY", err)
 	}
 
-	t.stdout, err = t.cmd.StdoutPipe()
-	if err != nil {
-		t.stdin.Close()
-		return NewCLIConnectionError("failed to create stdout pipe", err)
-	}
+	// Set PTY size to mimic a real terminal
+	pty.Setsize(t.pty, &pty.Winsize{
+		Rows: 24,
+		Cols: 80,
+	})
 
-	t.stderr, err = t.cmd.StderrPipe()
-	if err != nil {
-		t.stdin.Close()
-		t.stdout.Close()
-		return NewCLIConnectionError("failed to create stderr pipe", err)
-	}
-
-	if err := t.cmd.Start(); err != nil {
-		t.stdin.Close()
-		t.stdout.Close()
-		t.stderr.Close()
-		return NewCLIConnectionError("failed to start CLI", err)
-	}
+	// Set the PTY as stdin/stdout (stderr is combined with stdout in PTY)
+	t.stdin = t.pty
+	t.stdout = t.pty
+	t.stderr = nil // PTY combines stdout/stderr, no separate stderr
 
 	t.connected = true
 
-	// Start reading output
+	// Start reading output (PTY combines stdout and stderr)
 	go t.readOutput()
-	go t.readStderr()
+	// Note: readStderr is not started for PTY mode since they're combined
 
 	return nil
 }
@@ -208,7 +212,10 @@ func (t *SubprocessTransport) Close() error {
 		t.cancel()
 	}
 
-	if t.stdin != nil {
+	// Close PTY (which handles stdin/stdout/stderr)
+	if t.pty != nil {
+		t.pty.Close()
+	} else if t.stdin != nil {
 		t.stdin.Close()
 	}
 
@@ -406,7 +413,11 @@ func BuildCLIArgs(opts *AgentOptions) []string {
 	var args []string
 
 	// Output format for structured messages
-	args = append(args, "--output-format", "stream-json")
+	outputFormat := opts.OutputFormat
+	if outputFormat == "" {
+		outputFormat = "stream-json"
+	}
+	args = append(args, "--output-format", outputFormat)
 
 	// Permission handling
 	if opts.PermissionMode != "" {
@@ -439,6 +450,9 @@ func BuildCLIArgs(opts *AgentOptions) []string {
 	// Resource limits
 	if opts.MaxTurns > 0 {
 		args = append(args, "--max-turns", fmt.Sprintf("%d", opts.MaxTurns))
+	}
+	if opts.MaxTokens > 0 {
+		args = append(args, "--max-tokens", fmt.Sprintf("%d", opts.MaxTokens))
 	}
 	if opts.MaxThinkingTokens > 0 {
 		args = append(args, "--max-thinking-tokens", fmt.Sprintf("%d", opts.MaxThinkingTokens))
@@ -476,6 +490,88 @@ func BuildCLIArgs(opts *AgentOptions) []string {
 	}
 
 	return args
+}
+
+// BuildCLIEnv builds environment variables for the Claude CLI subprocess.
+// This merges the provided options with the current process environment.
+func BuildCLIEnv(opts *AgentOptions) []string {
+	env := os.Environ()
+
+	// Helper to add environment variable
+	addEnv := func(key, value string) {
+		if value != "" {
+			env = append(env, fmt.Sprintf("%s=%s", key, value))
+		}
+	}
+
+	// SDK entrypoint identifier
+	addEnv(EnvClaudeCodeEntrypoint, "sdk-go")
+
+	// API Authentication
+	addEnv(EnvAnthropicAPIKey, opts.APIKey)
+	addEnv(EnvClaudeAccessToken, opts.AccessToken)
+
+	// API Endpoint
+	addEnv(EnvAnthropicBaseURL, opts.BaseURL)
+
+	// Provider selection
+	switch opts.Provider {
+	case APIProviderBedrock:
+		addEnv(EnvClaudeCodeUseBedrock, "1")
+	case APIProviderVertex:
+		addEnv(EnvClaudeCodeUseVertex, "1")
+	}
+
+	// Model tiers
+	addEnv(EnvClaudeSmallFastModel, opts.SmallFastModel)
+	addEnv(EnvClaudeBigModel, opts.BigModel)
+
+	// Bedrock configuration
+	if opts.Bedrock != nil {
+		addEnv(EnvAWSRegion, opts.Bedrock.Region)
+		addEnv(EnvBedrockEndpointURL, opts.Bedrock.EndpointURL)
+		addEnv(EnvAWSAccessKeyID, opts.Bedrock.AccessKeyID)
+		addEnv(EnvAWSSecretAccessKey, opts.Bedrock.SecretAccessKey)
+		addEnv(EnvAWSSessionToken, opts.Bedrock.SessionToken)
+		addEnv(EnvAWSProfile, opts.Bedrock.Profile)
+		if opts.Bedrock.CrossRegion {
+			addEnv(EnvBedrockCrossRegion, "1")
+		}
+		if opts.Bedrock.PromptCaching {
+			addEnv(EnvBedrockPromptCaching, "1")
+		}
+	}
+
+	// Vertex configuration
+	if opts.Vertex != nil {
+		addEnv(EnvVertexProject, opts.Vertex.ProjectID)
+		addEnv(EnvVertexRegion, opts.Vertex.Region)
+	}
+
+	// Proxy configuration
+	if opts.Proxy != nil {
+		addEnv(EnvHTTPProxy, opts.Proxy.HTTPProxy)
+		addEnv(EnvHTTPSProxy, opts.Proxy.HTTPSProxy)
+		addEnv(EnvNoProxy, opts.Proxy.NoProxy)
+	}
+
+	// Behavior flags
+	if opts.NoTelemetry {
+		addEnv(EnvClaudeCodeNoTelemetry, "1")
+	}
+	if opts.SkipOAuth {
+		addEnv(EnvClaudeCodeSkipOAuth, "1")
+	}
+	if opts.Debug {
+		addEnv(EnvClaudeCodeDebug, "1")
+	}
+
+	// Custom environment variables from options
+	for k, v := range opts.Environment {
+		addEnv(k, v)
+	}
+
+	return env
 }
 
 // StreamParser parses JSON stream messages from the CLI.

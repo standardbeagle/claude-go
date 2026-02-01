@@ -1,0 +1,28 @@
+version: 2
+interactions:
+- request:
+    method: POST
+    url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    body: '{"model":"glm-4","messages":[{"role":"user","content":"My name is TestUser. Remember this for our conversation."}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"glm-test-123","object":"chat.completion","created":1234567890,"model":"glm-4","choices":[{"index":0,"message":{"role":"assistant","content":"I understand. I will remember that your name is TestUser."},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":20,"total_tokens":35}}'
+    headers:
+      content-type:
+      - application/json
+- request:
+    method: POST
+    url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    body: '{"model":"glm-4","messages":[{"role":"user","content":"What is my name?"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"glm-test-124","object":"chat.completion","created":1234567891,"model":"glm-4","choices":[{"index":0,"message":{"role":"assistant","content":"Your name is TestUser."},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}'
+    headers:
+      content-type:
+      - application/json

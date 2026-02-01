@@ -1,0 +1,28 @@
+version: 2
+interactions:
+- request:
+    method: POST
+    url: http://127.0.0.1:PORT/chat/completions
+    body: '{"model":"minimax-abab6.5-chat","messages":[{"role":"user","content":"What is the capital of France?"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"minimax-concurrent-1","object":"chat.completion","created":1234567890,"model":"minimax-abab6.5-chat","choices":[{"index":0,"message":{"role":"assistant","content":"Paris"},"finish_reason":"stop"}]}'
+    headers:
+      content-type:
+      - application/json
+- request:
+    method: POST
+    url: http://127.0.0.1:PORT/chat/completions
+    body: '{"model":"minimax-abab6.5-chat","messages":[{"role":"user","content":"What is the capital of France?"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"minimax-concurrent-2","object":"chat.completion","created":1234567891,"model":"minimax-abab6.5-chat","choices":[{"index":0,"message":{"role":"assistant","content":"Paris"},"finish_reason":"stop"}]}'
+    headers:
+      content-type:
+      - application/json

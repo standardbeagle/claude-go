@@ -1,0 +1,28 @@
+version: 2
+interactions:
+- request:
+    method: POST
+    url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    body: '{"model":"glm-4","messages":[{"role":"user","content":"What is the capital of France? Give a brief answer."}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"glm-concurrent-123","object":"chat.completion","created":1234567890,"model":"glm-4","choices":[{"index":0,"message":{"role":"assistant","content":"Paris."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}'
+    headers:
+      content-type:
+      - application/json
+- request:
+    method: POST
+    url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    body: '{"model":"glm-4","messages":[{"role":"user","content":"What is the capital of France? Give a brief answer."}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"glm-concurrent-124","object":"chat.completion","created":1234567891,"model":"glm-4","choices":[{"index":0,"message":{"role":"assistant","content":"Paris."},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":5,"total_tokens":17}}'
+    headers:
+      content-type:
+      - application/json

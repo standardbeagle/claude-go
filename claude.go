@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
 
@@ -53,9 +55,22 @@ type SDKPluginConfig struct {
 // AgentOptions provides comprehensive configuration for Claude agents.
 // This is the Go equivalent of Python's ClaudeAgentOptions.
 type AgentOptions struct {
+	// API Authentication
+	APIKey      string `json:"api_key,omitempty"`
+	AccessToken string `json:"access_token,omitempty"`
+
+	// API Endpoint Configuration
+	BaseURL string `json:"base_url,omitempty"`
+
+	// Provider Selection (anthropic, bedrock, vertex)
+	Provider APIProvider `json:"provider,omitempty"`
+
 	// Model configuration
 	Model             string `json:"model,omitempty"`
+	SmallFastModel    string `json:"small_fast_model,omitempty"` // Haiku-class model
+	BigModel          string `json:"big_model,omitempty"`        // Opus-class model
 	MaxThinkingTokens int    `json:"max_thinking_tokens,omitempty"`
+	MaxTokens         int    `json:"max_tokens,omitempty"` // Max output tokens
 
 	// System prompt
 	SystemPrompt string `json:"system_prompt,omitempty"`
@@ -70,6 +85,7 @@ type AgentOptions struct {
 	// Resource limits
 	MaxTurns     int     `json:"max_turns,omitempty"`
 	MaxBudgetUSD float64 `json:"max_budget_usd,omitempty"`
+	TimeoutSecs  int     `json:"timeout_secs,omitempty"`
 
 	// Session management
 	Resume               string `json:"resume,omitempty"`
@@ -97,15 +113,29 @@ type AgentOptions struct {
 	AddDirectories   []string `json:"add_directories,omitempty"`
 	WorkingDirectory string   `json:"working_directory,omitempty"`
 
-	// Environment variables
+	// AWS Bedrock Configuration
+	Bedrock *BedrockConfig `json:"bedrock,omitempty"`
+
+	// Google Vertex Configuration
+	Vertex *VertexConfig `json:"vertex,omitempty"`
+
+	// Proxy Configuration
+	Proxy *ProxyConfig `json:"proxy,omitempty"`
+
+	// Environment variables (passed to CLI subprocess)
 	Environment map[string]string `json:"environment,omitempty"`
 
 	// CLI configuration
 	CLIPath string `json:"cli_path,omitempty"`
 
-	// Debug options
-	Debug   bool `json:"debug,omitempty"`
-	Verbose bool `json:"verbose,omitempty"`
+	// Behavior flags
+	Debug       bool `json:"debug,omitempty"`
+	Verbose     bool `json:"verbose,omitempty"`
+	NoTelemetry bool `json:"no_telemetry,omitempty"`
+	SkipOAuth   bool `json:"skip_oauth,omitempty"`
+
+	// Output configuration
+	OutputFormat string `json:"output_format,omitempty"` // text, json, stream-json
 
 	// Legacy: Interactive mode (for backward compatibility)
 	Interactive bool `json:"interactive,omitempty"`
@@ -130,6 +160,7 @@ type Session struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	cmd      *exec.Cmd
+	pty      *os.File
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
@@ -296,6 +327,28 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Agen
 
 	env := cmd.Environ()
 	env = append(env, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+
+	// Pass Options fields as environment variables for the CLI
+	if opts.BaseURL != "" {
+		env = append(env, fmt.Sprintf("ANTHROPIC_BASE_URL=%s", opts.BaseURL))
+	}
+	if opts.APIKey != "" {
+		env = append(env, fmt.Sprintf("ANTHROPIC_API_KEY=%s", opts.APIKey))
+	}
+	if opts.AccessToken != "" {
+		env = append(env, fmt.Sprintf("ANTHROPIC_AUTH_TOKEN=%s", opts.AccessToken))
+	}
+	if opts.Model != "" {
+		env = append(env, fmt.Sprintf("ANTHROPIC_MODEL=%s", opts.Model))
+	}
+	if opts.SmallFastModel != "" {
+		env = append(env, fmt.Sprintf("ANTHROPIC_SMALL_FAST_MODEL=%s", opts.SmallFastModel))
+	}
+	if opts.BigModel != "" {
+		env = append(env, fmt.Sprintf("ANTHROPIC_DEFAULT_OPUS_MODEL=%s", opts.BigModel))
+	}
+
+	// Custom environment variables override
 	if opts.Environment != nil {
 		for k, v := range opts.Environment {
 			env = append(env, fmt.Sprintf("%s=%s", k, v))
@@ -303,44 +356,30 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Agen
 	}
 	cmd.Env = env
 
-	stdin, err := cmd.StdinPipe()
+	// Start the command with a PTY
+	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		cancel()
-		return nil, NewCLIConnectionError("failed to create stdin pipe", err)
+		return nil, NewCLIConnectionError("failed to start CLI with PTY", err)
 	}
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		stdin.Close()
-		return nil, NewCLIConnectionError("failed to create stdout pipe", err)
-	}
+	// Set PTY size to mimic a real terminal
+	pty.Setsize(ptyFile, &pty.Winsize{
+		Rows: 24,
+		Cols: 80,
+	})
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		stdin.Close()
-		stdout.Close()
-		return nil, NewCLIConnectionError("failed to create stderr pipe", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		stdin.Close()
-		stdout.Close()
-		stderr.Close()
-		return nil, NewCLIConnectionError("failed to start Claude CLI", err)
-	}
-
+	// PTY combines stdin/stdout/stderr
 	session := &Session{
 		ID:       sessionID,
 		client:   c,
 		ctx:      sessionCtx,
 		cancel:   cancel,
 		cmd:      cmd,
-		stdin:    stdin,
-		stdout:   stdout,
-		stderr:   stderr,
+		pty:      ptyFile,
+		stdin:    ptyFile,
+		stdout:   ptyFile,
+		stderr:   nil, // PTY combines stderr with stdout
 		options:  opts,
 		messages: make(chan *Message, 100),
 		errors:   make(chan error, 10),
@@ -362,8 +401,29 @@ func (c *Client) mergeOptions(opts *AgentOptions) *AgentOptions {
 	}
 
 	if opts != nil {
+		// API Authentication
+		if opts.APIKey != "" {
+			merged.APIKey = opts.APIKey
+		}
+		if opts.AccessToken != "" {
+			merged.AccessToken = opts.AccessToken
+		}
+		if opts.BaseURL != "" {
+			merged.BaseURL = opts.BaseURL
+		}
+		if opts.Provider != "" {
+			merged.Provider = opts.Provider
+		}
+
+		// Model configuration
 		if opts.Model != "" {
 			merged.Model = opts.Model
+		}
+		if opts.SmallFastModel != "" {
+			merged.SmallFastModel = opts.SmallFastModel
+		}
+		if opts.BigModel != "" {
+			merged.BigModel = opts.BigModel
 		}
 		if opts.MaxTurns > 0 {
 			merged.MaxTurns = opts.MaxTurns
@@ -371,14 +431,26 @@ func (c *Client) mergeOptions(opts *AgentOptions) *AgentOptions {
 		if opts.MaxThinkingTokens > 0 {
 			merged.MaxThinkingTokens = opts.MaxThinkingTokens
 		}
+		if opts.MaxTokens > 0 {
+			merged.MaxTokens = opts.MaxTokens
+		}
 		if opts.MaxBudgetUSD > 0 {
 			merged.MaxBudgetUSD = opts.MaxBudgetUSD
+		}
+		if opts.TimeoutSecs > 0 {
+			merged.TimeoutSecs = opts.TimeoutSecs
 		}
 		if opts.Debug {
 			merged.Debug = opts.Debug
 		}
 		if opts.Verbose {
 			merged.Verbose = opts.Verbose
+		}
+		if opts.NoTelemetry {
+			merged.NoTelemetry = opts.NoTelemetry
+		}
+		if opts.SkipOAuth {
+			merged.SkipOAuth = opts.SkipOAuth
 		}
 		if opts.PermissionMode != "" {
 			merged.PermissionMode = opts.PermissionMode
@@ -439,6 +511,18 @@ func (c *Client) mergeOptions(opts *AgentOptions) *AgentOptions {
 		if opts.Agents != nil {
 			merged.Agents = opts.Agents
 		}
+		if opts.Bedrock != nil {
+			merged.Bedrock = opts.Bedrock
+		}
+		if opts.Vertex != nil {
+			merged.Vertex = opts.Vertex
+		}
+		if opts.Proxy != nil {
+			merged.Proxy = opts.Proxy
+		}
+		if opts.OutputFormat != "" {
+			merged.OutputFormat = opts.OutputFormat
+		}
 	}
 
 	return merged
@@ -447,14 +531,8 @@ func (c *Client) mergeOptions(opts *AgentOptions) *AgentOptions {
 func (c *Client) buildArgs(opts *AgentOptions) []string {
 	var args []string
 
-	if opts.Interactive {
-		args = []string{"--dangerously-skip-permissions"}
-	} else {
-		args = []string{
-			"-p",
-			"--dangerously-skip-permissions",
-		}
-	}
+	// Always use interactive mode with stdin for prompt
+	args = []string{"--dangerously-skip-permissions"}
 
 	if opts.Debug {
 		args = append(args, "--debug")
@@ -549,7 +627,10 @@ func (s *Session) handleIO() {
 		close(s.errors)
 	}()
 
-	go s.handleStderr()
+	// Only start stderr handler if stderr is available (not for PTY mode)
+	if s.stderr != nil {
+		go s.handleStderr()
+	}
 	s.handleStdout()
 }
 
@@ -639,7 +720,10 @@ func (s *Session) Close() error {
 	s.closed = true
 	s.cancel()
 
-	if s.stdin != nil {
+	// Close PTY (which handles stdin/stdout) or just stdin if not using PTY
+	if s.pty != nil {
+		s.pty.Close()
+	} else if s.stdin != nil {
 		s.stdin.Close()
 	}
 
@@ -676,10 +760,10 @@ func Query(ctx context.Context, prompt string, opts *AgentOptions) ([]MessageTyp
 
 	// Create transport
 	transportOpts := &SubprocessTransportOptions{
-		CLIPath:    opts.CLIPath,
-		Args:       BuildCLIArgs(opts),
-		Env:        opts.Environment,
-		WorkingDir: opts.WorkingDirectory,
+		CLIPath:      opts.CLIPath,
+		Args:         BuildCLIArgs(opts),
+		AgentOptions: opts,
+		WorkingDir:   opts.WorkingDirectory,
 	}
 
 	transport, err := NewSubprocessTransport(transportOpts)
@@ -748,10 +832,10 @@ func NewQueryIterator(ctx context.Context, prompt string, opts *AgentOptions) (*
 	iterCtx, cancel := context.WithCancel(ctx)
 
 	transportOpts := &SubprocessTransportOptions{
-		CLIPath:    opts.CLIPath,
-		Args:       BuildCLIArgs(opts),
-		Env:        opts.Environment,
-		WorkingDir: opts.WorkingDirectory,
+		CLIPath:      opts.CLIPath,
+		Args:         BuildCLIArgs(opts),
+		AgentOptions: opts,
+		WorkingDir:   opts.WorkingDirectory,
 	}
 
 	transport, err := NewSubprocessTransport(transportOpts)

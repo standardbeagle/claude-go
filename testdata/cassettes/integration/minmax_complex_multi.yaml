@@ -1,0 +1,41 @@
+version: 2
+interactions:
+- request:
+    method: POST
+    url: https://api.minimax.chat/v1/openai/chat/completions
+    body: '{"model":"minimax-abab6.5-chat","messages":[{"role":"user","content":"Are you ready to help with some tasks?"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"minimax-complex-123","object":"chat.completion","created":1234567890,"model":"minimax-abab6.5-chat","choices":[{"index":0,"message":{"role":"assistant","content":"Yes, I am ready to help you with your tasks."},"finish_reason":"stop"}],"usage":{"prompt_tokens":15,"completion_tokens":15,"total_tokens":30}}'
+    headers:
+      content-type:
+      - application/json
+- request:
+    method: POST
+    url: https://api.minimax.chat/v1/openai/chat/completions
+    body: '{"model":"minimax-abab6.5-chat","messages":[{"role":"user","content":"What is 5 * 7?"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"minimax-complex-124","object":"chat.completion","created":1234567891,"model":"minimax-abab6.5-chat","choices":[{"index":0,"message":{"role":"assistant","content":"35"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}'
+    headers:
+      content-type:
+      - application/json
+- request:
+    method: POST
+    url: https://api.minimax.chat/v1/openai/chat/completions
+    body: '{"model":"minimax-abab6.5-chat","messages":[{"role":"user","content":"What is 100 - 45?"}]}'
+    headers:
+      content-type:
+      - application/json
+  response:
+    status: 200
+    body: '{"id":"minimax-complex-125","object":"chat.completion","created":1234567892,"model":"minimax-abab6.5-chat","choices":[{"index":0,"message":{"role":"assistant","content":"55"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}'
+    headers:
+      content-type:
+      - application/json
