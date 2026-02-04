@@ -356,7 +356,7 @@ func (c *Client) createSession(ctx context.Context, sessionID string, opts *Agen
 	}
 	cmd.Env = env
 
-	// Start the command with a PTY
+	// Start the command with a PTY for interactive sessions
 	ptyFile, err := pty.Start(cmd)
 	if err != nil {
 		cancel()
@@ -782,8 +782,9 @@ func Query(ctx context.Context, prompt string, opts *AgentOptions) ([]MessageTyp
 		return nil, err
 	}
 
-	// Close stdin to signal end of input
-	transport.stdin.Close()
+	// Signal end of input - this is a no-op in PTY mode since we can't
+	// half-close a PTY without also closing the read side.
+	transport.SignalInputComplete()
 
 	// Parse messages
 	parser := NewStreamParser()
@@ -856,8 +857,9 @@ func NewQueryIterator(ctx context.Context, prompt string, opts *AgentOptions) (*
 		return nil, err
 	}
 
-	// Close stdin to signal end of input
-	transport.stdin.Close()
+	// Signal end of input - this is a no-op in PTY mode since we can't
+	// half-close a PTY without also closing the read side.
+	transport.SignalInputComplete()
 
 	parser := NewStreamParser()
 	go parser.Parse(iterCtx, transport)

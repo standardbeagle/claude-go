@@ -12,8 +12,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-
-	"github.com/creack/pty"
 )
 
 // Transport defines the interface for communicating with Claude.
@@ -40,7 +38,7 @@ type TransportMessage struct {
 	Error error
 }
 
-// SubprocessTransport communicates with Claude via subprocess.
+// SubprocessTransport communicates with Claude via subprocess using pipes.
 type SubprocessTransport struct {
 	cliPath    string
 	args       []string
@@ -48,7 +46,6 @@ type SubprocessTransport struct {
 	workingDir string
 
 	cmd      *exec.Cmd
-	pty      *os.File
 	stdin    io.WriteCloser
 	stdout   io.ReadCloser
 	stderr   io.ReadCloser
@@ -70,6 +67,10 @@ type SubprocessTransportOptions struct {
 	AgentOptions *AgentOptions     // Full options for environment building
 	WorkingDir   string
 	BufferSize   int
+	// UsePipes disables PTY mode and uses standard pipes for stdin/stdout/stderr.
+	// This is useful for non-interactive JSON communication where PTY echo
+	// and line discipline features are not needed.
+	UsePipes bool
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -124,6 +125,7 @@ func NewSubprocessTransport(opts *SubprocessTransportOptions) (*SubprocessTransp
 }
 
 // Connect starts the subprocess and establishes communication.
+// Uses standard pipes for stdin/stdout/stderr for clean JSON communication.
 func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -140,29 +142,34 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 		t.cmd.Dir = t.workingDir
 	}
 
-	// Start the command with a PTY
+	// Use standard pipes for clean JSON communication (no PTY echo/line discipline)
 	var err error
-	t.pty, err = pty.Start(t.cmd)
+	t.stdin, err = t.cmd.StdinPipe()
 	if err != nil {
-		return NewCLIConnectionError("failed to start CLI with PTY", err)
+		return NewCLIConnectionError("failed to create stdin pipe", err)
 	}
 
-	// Set PTY size to mimic a real terminal
-	pty.Setsize(t.pty, &pty.Winsize{
-		Rows: 24,
-		Cols: 80,
-	})
+	t.stdout, err = t.cmd.StdoutPipe()
+	if err != nil {
+		return NewCLIConnectionError("failed to create stdout pipe", err)
+	}
 
-	// Set the PTY as stdin/stdout (stderr is combined with stdout in PTY)
-	t.stdin = t.pty
-	t.stdout = t.pty
-	t.stderr = nil // PTY combines stdout/stderr, no separate stderr
+	t.stderr, err = t.cmd.StderrPipe()
+	if err != nil {
+		return NewCLIConnectionError("failed to create stderr pipe", err)
+	}
+
+	// Start the command
+	if err := t.cmd.Start(); err != nil {
+		return NewCLIConnectionError("failed to start CLI", err)
+	}
 
 	t.connected = true
 
-	// Start reading output (PTY combines stdout and stderr)
+	// Start reading output from stdout
 	go t.readOutput()
-	// Note: readStderr is not started for PTY mode since they're combined
+	// Start reading stderr for error reporting
+	go t.readStderr()
 
 	return nil
 }
@@ -212,10 +219,8 @@ func (t *SubprocessTransport) Close() error {
 		t.cancel()
 	}
 
-	// Close PTY (which handles stdin/stdout/stderr)
-	if t.pty != nil {
-		t.pty.Close()
-	} else if t.stdin != nil {
+	// Close stdin to signal EOF to the subprocess
+	if t.stdin != nil {
 		t.stdin.Close()
 	}
 
@@ -232,6 +237,24 @@ func (t *SubprocessTransport) IsConnected() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.connected
+}
+
+// IsPTYMode returns true if the transport is using PTY mode.
+// Note: This transport always uses pipes, so this returns false.
+func (t *SubprocessTransport) IsPTYMode() bool {
+	return false
+}
+
+// SignalInputComplete signals that no more input will be sent by closing stdin.
+// This allows the subprocess to detect EOF and complete processing.
+func (t *SubprocessTransport) SignalInputComplete() error {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	if t.stdin != nil {
+		return t.stdin.Close()
+	}
+	return nil
 }
 
 func (t *SubprocessTransport) readOutput() {
@@ -482,10 +505,11 @@ func BuildCLIArgs(opts *AgentOptions) []string {
 	}
 
 	// Debug/verbose
+	// Note: --verbose is required for stream-json output format
 	if opts.Debug {
 		args = append(args, "--debug")
 	}
-	if opts.Verbose {
+	if opts.Verbose || outputFormat == "stream-json" {
 		args = append(args, "--verbose")
 	}
 
