@@ -119,11 +119,19 @@
 //		Hooks: registry,
 //	})
 //
+// # Stream-JSON Format
+//
+// Claude Code's --output-format stream-json produces JSONL where assistant
+// and user messages wrap content in a nested "message" key:
+//
+//	{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}
+//
+// ParseMessage handles both this nested format and flat content automatically.
+//
 // # Structured Message Types
 //
 // The SDK provides typed messages for parsing CLI JSON output:
 //
-//	// Parse JSON stream messages
 //	msg, err := claude.ParseMessage(jsonData)
 //
 //	switch m := msg.(type) {
@@ -134,10 +142,15 @@
 //				fmt.Println(b.Text)
 //			case claude.ToolUseBlock:
 //				fmt.Printf("Tool: %s\n", b.Name)
+//			case claude.ThinkingBlock:
+//				// Extended thinking
+//			case claude.ToolResultBlock:
+//				// Tool execution result
 //			}
 //		}
 //	case claude.ResultMessage:
 //		fmt.Printf("Cost: $%.4f\n", m.TotalCostUSD)
+//		fmt.Println(m.Result) // Complete response text
 //	}
 //
 // # File Operations

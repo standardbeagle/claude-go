@@ -219,6 +219,17 @@ func ParseMessage(raw json.RawMessage) (MessageType, error) {
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return nil, err
 		}
+		// Handle nested message.content format (Claude Code stream-json)
+		if msg.RawContent == nil {
+			var nested struct {
+				Message struct {
+					Content json.RawMessage `json:"content"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal(raw, &nested); err == nil && nested.Message.Content != nil {
+				msg.RawContent = nested.Message.Content
+			}
+		}
 		if msg.RawContent != nil {
 			blocks, err := ParseContentBlocks(msg.RawContent)
 			if err != nil {
@@ -231,6 +242,21 @@ func ParseMessage(raw json.RawMessage) (MessageType, error) {
 		var msg AssistantMessage
 		if err := json.Unmarshal(raw, &msg); err != nil {
 			return nil, err
+		}
+		// Handle nested message.content format (Claude Code stream-json)
+		if msg.RawContent == nil {
+			var nested struct {
+				Message struct {
+					Content json.RawMessage `json:"content"`
+					Model   string          `json:"model,omitempty"`
+				} `json:"message"`
+			}
+			if err := json.Unmarshal(raw, &nested); err == nil && nested.Message.Content != nil {
+				msg.RawContent = nested.Message.Content
+				if nested.Message.Model != "" {
+					msg.Model = nested.Message.Model
+				}
+			}
 		}
 		if msg.RawContent != nil {
 			blocks, err := ParseContentBlocks(msg.RawContent)

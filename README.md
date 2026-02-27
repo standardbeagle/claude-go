@@ -180,6 +180,22 @@ type AgentOptions struct {
 }
 ```
 
+## Stream-JSON Format
+
+Claude Code's `--output-format stream-json` produces JSONL (one JSON object per line).
+Content is nested under a `message` key for assistant and user messages:
+
+```jsonl
+{"type":"system","subtype":"init","session_id":"abc-123"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}],"model":"claude-sonnet-4-20250514"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"main.go"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"package main..."}]}}
+{"type":"result","session_id":"abc-123","duration_ms":5000,"result":"Done.","total_cost_usd":0.05}
+```
+
+`ParseMessage` handles this nested format automatically, extracting `message.content`
+into `AssistantMessage.Content` and `UserMessage.Content`.
+
 ## Structured Message Types
 
 Parse typed messages from Claude:
@@ -195,10 +211,89 @@ case claude.AssistantMessage:
             fmt.Println(b.Text)
         case claude.ToolUseBlock:
             fmt.Printf("Tool: %s(%v)\n", b.Name, b.Input)
+        case claude.ThinkingBlock:
+            // Claude's internal reasoning (extended thinking)
+        case claude.ToolResultBlock:
+            // Result from a tool execution
         }
     }
+case claude.SystemMessage:
+    // Subtypes: "init", "hook_started", "hook_response", etc.
+    fmt.Printf("System: %s\n", m.Subtype)
 case claude.ResultMessage:
     fmt.Printf("Cost: $%.4f, Turns: %d\n", m.TotalCostUSD, m.NumTurns)
+    fmt.Println(m.Result) // Complete response text
+case claude.StreamEvent:
+    // Raw streaming events (partial content deltas)
+}
+```
+
+### Message Types
+
+| Type | Description |
+|------|-------------|
+| `SystemMessage` | System events: `init`, `hook_started`, `hook_response` |
+| `AssistantMessage` | Claude's response with content blocks |
+| `UserMessage` | User input or tool results |
+| `ResultMessage` | Final summary: session ID, cost, duration, token usage |
+| `StreamEvent` | Raw streaming events |
+
+### Content Block Types
+
+| Block | Description |
+|-------|-------------|
+| `TextBlock` | Plain text response |
+| `ThinkingBlock` | Extended thinking (internal reasoning) |
+| `ToolUseBlock` | Tool invocation with name, ID, and input |
+| `ToolResultBlock` | Tool execution result |
+
+## Streaming with QueryIterator
+
+For real-time message processing, use `QueryIterator`:
+
+```go
+iter, err := claude.NewQueryIterator(ctx, "Fix the bug in main.go", &claude.AgentOptions{
+    PermissionMode: claude.PermissionModeBypassPermission,
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer iter.Close()
+
+// Channel-based streaming
+for {
+    select {
+    case msg, ok := <-iter.Messages():
+        if !ok {
+            return // done
+        }
+        switch m := msg.(type) {
+        case claude.AssistantMessage:
+            if text := claude.GetText(m); text != "" {
+                fmt.Print(text)
+            }
+        case claude.ResultMessage:
+            fmt.Printf("\nSession: %s, Cost: $%.4f\n", m.SessionID, m.TotalCostUSD)
+            return
+        }
+    case err := <-iter.Errors():
+        log.Printf("Error: %v", err)
+    }
+}
+```
+
+Or use the simpler `Next()` iterator:
+
+```go
+for {
+    msg, err := iter.Next()
+    if err != nil {
+        log.Fatal(err)
+    }
+    if msg == nil {
+        break // done
+    }
+    // handle msg...
 }
 ```
 

@@ -45,7 +45,6 @@ examples/*/interactive
 
 # Debug files
 debug/
-*_test.go
 *_debug.go
 simple_*.go
 direct_*.go
