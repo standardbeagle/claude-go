@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -39,6 +40,8 @@ type ToolUseBlock struct {
 func (ToolUseBlock) contentBlock() {}
 
 // ToolResultBlock contains the result of a tool execution.
+// Content can be a string or an array of content blocks in the JSON;
+// UnmarshalJSON normalizes both forms into a single string.
 type ToolResultBlock struct {
 	Type      string `json:"type"` // Always "tool_result"
 	ToolUseID string `json:"tool_use_id"`
@@ -47,6 +50,57 @@ type ToolResultBlock struct {
 }
 
 func (ToolResultBlock) contentBlock() {}
+
+// UnmarshalJSON handles both string and array formats for the content field.
+// Claude Code can emit tool results as either:
+//
+//	"content": "text string"
+//	"content": [{"type": "text", "text": "..."}]
+func (t *ToolResultBlock) UnmarshalJSON(data []byte) error {
+	// Alias to avoid recursive UnmarshalJSON call
+	type Alias struct {
+		Type      string          `json:"type"`
+		ToolUseID string          `json:"tool_use_id"`
+		Content   json.RawMessage `json:"content,omitempty"`
+		IsError   bool            `json:"is_error,omitempty"`
+	}
+	var a Alias
+	if err := json.Unmarshal(data, &a); err != nil {
+		return err
+	}
+	t.Type = a.Type
+	t.ToolUseID = a.ToolUseID
+	t.IsError = a.IsError
+
+	if len(a.Content) == 0 {
+		return nil
+	}
+
+	// Try string first (common case)
+	var s string
+	if err := json.Unmarshal(a.Content, &s); err == nil {
+		t.Content = s
+		return nil
+	}
+
+	// Try array of content blocks — extract and join text
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(a.Content, &blocks); err == nil {
+		var parts []string
+		for _, b := range blocks {
+			if b.Text != "" {
+				parts = append(parts, b.Text)
+			}
+		}
+		t.Content = strings.Join(parts, "\n")
+		return nil
+	}
+
+	return nil
+}
 
 // Message is the interface for all message types.
 type MessageType interface {

@@ -80,6 +80,81 @@ func TestParseToolResultBlock(t *testing.T) {
 	}
 }
 
+func TestParseToolResultBlock_ArrayContent(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type": "tool_result",
+		"tool_use_id": "toolu_01Xymyt5YYn5peWdCRJoVvuX",
+		"content": [{"type": "text", "text": "file contents here"}]
+	}`)
+
+	block, err := ParseContentBlock(raw)
+	if err != nil {
+		t.Fatalf("ParseContentBlock failed: %v", err)
+	}
+
+	resultBlock, ok := block.(ToolResultBlock)
+	if !ok {
+		t.Fatal("Expected ToolResultBlock")
+	}
+
+	if resultBlock.ToolUseID != "toolu_01Xymyt5YYn5peWdCRJoVvuX" {
+		t.Errorf("Expected tool_use_id, got '%s'", resultBlock.ToolUseID)
+	}
+	if resultBlock.Content != "file contents here" {
+		t.Errorf("Expected content 'file contents here', got '%s'", resultBlock.Content)
+	}
+}
+
+func TestParseToolResultBlock_MultipleArrayContent(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type": "tool_result",
+		"tool_use_id": "tool-456",
+		"content": [
+			{"type": "text", "text": "first part"},
+			{"type": "text", "text": "second part"}
+		]
+	}`)
+
+	block, err := ParseContentBlock(raw)
+	if err != nil {
+		t.Fatalf("ParseContentBlock failed: %v", err)
+	}
+
+	resultBlock, ok := block.(ToolResultBlock)
+	if !ok {
+		t.Fatal("Expected ToolResultBlock")
+	}
+
+	if resultBlock.Content != "first part\nsecond part" {
+		t.Errorf("Expected joined content, got '%s'", resultBlock.Content)
+	}
+}
+
+func TestParseToolResultBlock_EmptyContent(t *testing.T) {
+	raw := json.RawMessage(`{
+		"type": "tool_result",
+		"tool_use_id": "tool-789",
+		"is_error": true
+	}`)
+
+	block, err := ParseContentBlock(raw)
+	if err != nil {
+		t.Fatalf("ParseContentBlock failed: %v", err)
+	}
+
+	resultBlock, ok := block.(ToolResultBlock)
+	if !ok {
+		t.Fatal("Expected ToolResultBlock")
+	}
+
+	if resultBlock.Content != "" {
+		t.Errorf("Expected empty content, got '%s'", resultBlock.Content)
+	}
+	if !resultBlock.IsError {
+		t.Error("Expected is_error to be true")
+	}
+}
+
 func TestParseThinkingBlock(t *testing.T) {
 	raw := json.RawMessage(`{
 		"type": "thinking",
