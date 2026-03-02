@@ -9,10 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 )
+
+// ansiEscRegex matches ANSI CSI escape sequences (colors, cursor, erase, etc.).
+var ansiEscRegex = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
 
 // Transport defines the interface for communicating with Claude.
 type Transport interface {
@@ -149,6 +153,11 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 
 	t.cmd = exec.CommandContext(t.ctx, t.cliPath, t.args...)
 	t.cmd.Env = t.env
+	if t.usePTYStdout {
+		// Disable color output — PTY makes Node.js detect isTTY=true which
+		// enables ANSI color codes that corrupt the JSON stream.
+		t.cmd.Env = append(t.cmd.Env, "NO_COLOR=1")
+	}
 	if t.workingDir != "" {
 		t.cmd.Dir = t.workingDir
 	}
@@ -327,6 +336,16 @@ func (t *SubprocessTransport) readOutput() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
+		}
+
+		// Strip ANSI escape sequences when using PTY stdout — the PTY makes
+		// Node.js think stdout is a terminal, which can trigger color output
+		// despite NO_COLOR=1 (e.g. from dependencies or non-compliant code).
+		if t.ptyMaster != nil {
+			line = ansiEscRegex.ReplaceAll(line, nil)
+			if len(line) == 0 {
+				continue
+			}
 		}
 
 		// Make a copy since scanner reuses the buffer
