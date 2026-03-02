@@ -764,7 +764,6 @@ func Query(ctx context.Context, prompt string, opts *AgentOptions) ([]MessageTyp
 		Args:         BuildCLIArgs(opts),
 		AgentOptions: opts,
 		WorkingDir:   opts.WorkingDirectory,
-		UsePTYStdout: true, // PTY stdout forces synchronous writes in Node.js
 	}
 
 	transport, err := NewSubprocessTransport(transportOpts)
@@ -838,7 +837,6 @@ func NewQueryIterator(ctx context.Context, prompt string, opts *AgentOptions) (*
 		Args:         BuildCLIArgs(opts),
 		AgentOptions: opts,
 		WorkingDir:   opts.WorkingDirectory,
-		UsePTYStdout: true, // PTY stdout forces synchronous writes in Node.js
 	}
 
 	transport, err := NewSubprocessTransport(transportOpts)

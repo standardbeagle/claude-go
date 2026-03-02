@@ -2,7 +2,6 @@ package claude
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,14 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 )
-
-// ansiEscRegex matches ANSI CSI escape sequences (colors, cursor, erase, etc.).
-var ansiEscRegex = regexp.MustCompile("\x1b\\[[0-9;?]*[a-zA-Z]")
 
 // Transport defines the interface for communicating with Claude.
 type Transport interface {
@@ -45,18 +40,16 @@ type TransportMessage struct {
 
 // SubprocessTransport communicates with Claude via subprocess using pipes.
 type SubprocessTransport struct {
-	cliPath      string
-	args         []string
-	env          []string
-	workingDir   string
-	usePTYStdout bool
+	cliPath    string
+	args       []string
+	env        []string
+	workingDir string
 
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	stdout    io.ReadCloser
-	stderr    io.ReadCloser
-	ptyMaster *os.File
-	messages  chan TransportMessage
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	stdout   io.ReadCloser
+	stderr   io.ReadCloser
+	messages chan TransportMessage
 
 	connected bool
 	mu        sync.RWMutex
@@ -78,12 +71,6 @@ type SubprocessTransportOptions struct {
 	// This is useful for non-interactive JSON communication where PTY echo
 	// and line discipline features are not needed.
 	UsePipes bool
-	// UsePTYStdout allocates a PTY for the subprocess stdout while keeping
-	// stdin and stderr as pipes. This makes Node.js detect isTTY=true on
-	// stdout and use synchronous tty.WriteStream, which flushes each JSON
-	// line immediately instead of buffering in libuv's async write queue.
-	// Falls back to pipe on platforms without PTY support.
-	UsePTYStdout bool
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -129,19 +116,16 @@ func NewSubprocessTransport(opts *SubprocessTransportOptions) (*SubprocessTransp
 	}
 
 	return &SubprocessTransport{
-		cliPath:      cliPath,
-		args:         opts.Args,
-		env:          env,
-		workingDir:   opts.WorkingDir,
-		usePTYStdout: opts.UsePTYStdout,
-		messages:     make(chan TransportMessage, bufferSize),
+		cliPath:    cliPath,
+		args:       opts.Args,
+		env:        env,
+		workingDir: opts.WorkingDir,
+		messages:   make(chan TransportMessage, bufferSize),
 	}, nil
 }
 
 // Connect starts the subprocess and establishes communication.
-// Stdin and stderr always use pipes. Stdout uses a PTY when UsePTYStdout
-// is enabled (so Node.js sees isTTY=true and flushes synchronously),
-// falling back to a pipe if PTY allocation fails or is unsupported.
+// Uses standard pipes for stdin/stdout/stderr for clean JSON communication.
 func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -154,69 +138,30 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 
 	t.cmd = exec.CommandContext(t.ctx, t.cliPath, t.args...)
 	t.cmd.Env = t.env
-	if t.usePTYStdout {
-		// Disable color output — PTY makes Node.js detect isTTY=true which
-		// enables ANSI color codes that corrupt the JSON stream.
-		t.cmd.Env = append(t.cmd.Env, "NO_COLOR=1")
-	}
 	if t.workingDir != "" {
 		t.cmd.Dir = t.workingDir
 	}
 
-	// Stdin: always a pipe for clean EOF signaling
+	// Use standard pipes for clean JSON communication (no PTY echo/line discipline)
 	var err error
 	t.stdin, err = t.cmd.StdinPipe()
 	if err != nil {
 		return NewCLIConnectionError("failed to create stdin pipe", err)
 	}
 
-	// Stdout: PTY (for streaming flush) or pipe
-	var ptySlave *os.File
-	if t.usePTYStdout {
-		ptmx, pts, pErr := openPTYPair()
-		if pErr == nil {
-			t.cmd.Stdout = pts
-			ptySlave = pts
-			t.ptyMaster = ptmx
-		}
-		// On error, fall through to pipe
-	}
-	if t.ptyMaster == nil {
-		t.stdout, err = t.cmd.StdoutPipe()
-		if err != nil {
-			return NewCLIConnectionError("failed to create stdout pipe", err)
-		}
+	t.stdout, err = t.cmd.StdoutPipe()
+	if err != nil {
+		return NewCLIConnectionError("failed to create stdout pipe", err)
 	}
 
-	// Stderr: always a pipe
 	t.stderr, err = t.cmd.StderrPipe()
 	if err != nil {
-		if t.ptyMaster != nil {
-			t.ptyMaster.Close()
-			t.ptyMaster = nil
-		}
-		if ptySlave != nil {
-			ptySlave.Close()
-		}
 		return NewCLIConnectionError("failed to create stderr pipe", err)
 	}
 
 	// Start the command
 	if err := t.cmd.Start(); err != nil {
-		if t.ptyMaster != nil {
-			t.ptyMaster.Close()
-			t.ptyMaster = nil
-		}
-		if ptySlave != nil {
-			ptySlave.Close()
-		}
 		return NewCLIConnectionError("failed to start CLI", err)
-	}
-
-	// Close PTY slave in parent after child has inherited it
-	if ptySlave != nil {
-		ptySlave.Close()
-		t.stdout = t.ptyMaster
 	}
 
 	t.connected = true
@@ -279,11 +224,6 @@ func (t *SubprocessTransport) Close() error {
 		t.stdin.Close()
 	}
 
-	// Close PTY master if used for stdout
-	if t.ptyMaster != nil {
-		t.ptyMaster.Close()
-	}
-
 	if t.cmd != nil && t.cmd.Process != nil {
 		t.cmd.Process.Kill()
 		t.cmd.Wait()
@@ -339,20 +279,6 @@ func (t *SubprocessTransport) readOutput() {
 			continue
 		}
 
-		// PTY stdout makes Node.js think it's a real terminal, which triggers
-		// banner output, ANSI colors, and TUI elements mixed into the JSON stream.
-		// Strip ANSI escapes and skip non-JSON lines (banner, progress bars, etc.).
-		if t.ptyMaster != nil {
-			line = ansiEscRegex.ReplaceAll(line, nil)
-			// Find the first '{' — all stream-json messages are JSON objects.
-			// Skip lines that are purely non-JSON (logo, status bars, etc.).
-			if idx := bytes.IndexByte(line, '{'); idx >= 0 {
-				line = line[idx:]
-			} else {
-				continue
-			}
-		}
-
 		// Make a copy since scanner reuses the buffer
 		data := make([]byte, len(line))
 		copy(data, line)
@@ -361,10 +287,7 @@ func (t *SubprocessTransport) readOutput() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		// PTY master returns EIO when the child exits — this is normal termination
-		if t.ptyMaster == nil {
-			t.messages <- TransportMessage{Error: NewCLIConnectionError("stdout read error", err)}
-		}
+		t.messages <- TransportMessage{Error: NewCLIConnectionError("stdout read error", err)}
 	}
 }
 
