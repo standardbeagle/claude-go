@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -338,12 +339,16 @@ func (t *SubprocessTransport) readOutput() {
 			continue
 		}
 
-		// Strip ANSI escape sequences when using PTY stdout — the PTY makes
-		// Node.js think stdout is a terminal, which can trigger color output
-		// despite NO_COLOR=1 (e.g. from dependencies or non-compliant code).
+		// PTY stdout makes Node.js think it's a real terminal, which triggers
+		// banner output, ANSI colors, and TUI elements mixed into the JSON stream.
+		// Strip ANSI escapes and skip non-JSON lines (banner, progress bars, etc.).
 		if t.ptyMaster != nil {
 			line = ansiEscRegex.ReplaceAll(line, nil)
-			if len(line) == 0 {
+			// Find the first '{' — all stream-json messages are JSON objects.
+			// Skip lines that are purely non-JSON (logo, status bars, etc.).
+			if idx := bytes.IndexByte(line, '{'); idx >= 0 {
+				line = line[idx:]
+			} else {
 				continue
 			}
 		}
