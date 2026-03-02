@@ -40,16 +40,18 @@ type TransportMessage struct {
 
 // SubprocessTransport communicates with Claude via subprocess using pipes.
 type SubprocessTransport struct {
-	cliPath    string
-	args       []string
-	env        []string
-	workingDir string
+	cliPath      string
+	args         []string
+	env          []string
+	workingDir   string
+	usePTYStdout bool
 
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	stdout   io.ReadCloser
-	stderr   io.ReadCloser
-	messages chan TransportMessage
+	cmd       *exec.Cmd
+	stdin     io.WriteCloser
+	stdout    io.ReadCloser
+	stderr    io.ReadCloser
+	ptyMaster *os.File
+	messages  chan TransportMessage
 
 	connected bool
 	mu        sync.RWMutex
@@ -71,6 +73,12 @@ type SubprocessTransportOptions struct {
 	// This is useful for non-interactive JSON communication where PTY echo
 	// and line discipline features are not needed.
 	UsePipes bool
+	// UsePTYStdout allocates a PTY for the subprocess stdout while keeping
+	// stdin and stderr as pipes. This makes Node.js detect isTTY=true on
+	// stdout and use synchronous tty.WriteStream, which flushes each JSON
+	// line immediately instead of buffering in libuv's async write queue.
+	// Falls back to pipe on platforms without PTY support.
+	UsePTYStdout bool
 }
 
 // NewSubprocessTransport creates a new subprocess transport.
@@ -116,16 +124,19 @@ func NewSubprocessTransport(opts *SubprocessTransportOptions) (*SubprocessTransp
 	}
 
 	return &SubprocessTransport{
-		cliPath:    cliPath,
-		args:       opts.Args,
-		env:        env,
-		workingDir: opts.WorkingDir,
-		messages:   make(chan TransportMessage, bufferSize),
+		cliPath:      cliPath,
+		args:         opts.Args,
+		env:          env,
+		workingDir:   opts.WorkingDir,
+		usePTYStdout: opts.UsePTYStdout,
+		messages:     make(chan TransportMessage, bufferSize),
 	}, nil
 }
 
 // Connect starts the subprocess and establishes communication.
-// Uses standard pipes for stdin/stdout/stderr for clean JSON communication.
+// Stdin and stderr always use pipes. Stdout uses a PTY when UsePTYStdout
+// is enabled (so Node.js sees isTTY=true and flushes synchronously),
+// falling back to a pipe if PTY allocation fails or is unsupported.
 func (t *SubprocessTransport) Connect(ctx context.Context) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -142,26 +153,60 @@ func (t *SubprocessTransport) Connect(ctx context.Context) error {
 		t.cmd.Dir = t.workingDir
 	}
 
-	// Use standard pipes for clean JSON communication (no PTY echo/line discipline)
+	// Stdin: always a pipe for clean EOF signaling
 	var err error
 	t.stdin, err = t.cmd.StdinPipe()
 	if err != nil {
 		return NewCLIConnectionError("failed to create stdin pipe", err)
 	}
 
-	t.stdout, err = t.cmd.StdoutPipe()
-	if err != nil {
-		return NewCLIConnectionError("failed to create stdout pipe", err)
+	// Stdout: PTY (for streaming flush) or pipe
+	var ptySlave *os.File
+	if t.usePTYStdout {
+		ptmx, pts, pErr := openPTYPair()
+		if pErr == nil {
+			t.cmd.Stdout = pts
+			ptySlave = pts
+			t.ptyMaster = ptmx
+		}
+		// On error, fall through to pipe
+	}
+	if t.ptyMaster == nil {
+		t.stdout, err = t.cmd.StdoutPipe()
+		if err != nil {
+			return NewCLIConnectionError("failed to create stdout pipe", err)
+		}
 	}
 
+	// Stderr: always a pipe
 	t.stderr, err = t.cmd.StderrPipe()
 	if err != nil {
+		if t.ptyMaster != nil {
+			t.ptyMaster.Close()
+			t.ptyMaster = nil
+		}
+		if ptySlave != nil {
+			ptySlave.Close()
+		}
 		return NewCLIConnectionError("failed to create stderr pipe", err)
 	}
 
 	// Start the command
 	if err := t.cmd.Start(); err != nil {
+		if t.ptyMaster != nil {
+			t.ptyMaster.Close()
+			t.ptyMaster = nil
+		}
+		if ptySlave != nil {
+			ptySlave.Close()
+		}
 		return NewCLIConnectionError("failed to start CLI", err)
+	}
+
+	// Close PTY slave in parent after child has inherited it
+	if ptySlave != nil {
+		ptySlave.Close()
+		t.stdout = t.ptyMaster
 	}
 
 	t.connected = true
@@ -222,6 +267,11 @@ func (t *SubprocessTransport) Close() error {
 	// Close stdin to signal EOF to the subprocess
 	if t.stdin != nil {
 		t.stdin.Close()
+	}
+
+	// Close PTY master if used for stdout
+	if t.ptyMaster != nil {
+		t.ptyMaster.Close()
 	}
 
 	if t.cmd != nil && t.cmd.Process != nil {
@@ -287,7 +337,10 @@ func (t *SubprocessTransport) readOutput() {
 	}
 
 	if err := scanner.Err(); err != nil {
-		t.messages <- TransportMessage{Error: NewCLIConnectionError("stdout read error", err)}
+		// PTY master returns EIO when the child exits — this is normal termination
+		if t.ptyMaster == nil {
+			t.messages <- TransportMessage{Error: NewCLIConnectionError("stdout read error", err)}
+		}
 	}
 }
 
