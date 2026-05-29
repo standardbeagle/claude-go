@@ -107,6 +107,9 @@ func TestMultiTurnConversation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
 	}
+	if os.Getenv("ANTHROPIC_BASE_URL") == "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
+		t.Skip("Set ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN to run this test")
+	}
 
 	client := New(&Options{
 		PermissionMode: "bypassPermissions",
@@ -170,6 +173,9 @@ func TestMultiTurnConversation(t *testing.T) {
 func TestFileOperations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
+	}
+	if os.Getenv("ANTHROPIC_BASE_URL") == "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
+		t.Skip("Set ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN to run this test")
 	}
 
 	// Create temporary directory for test
@@ -262,6 +268,9 @@ func TestFileOperations(t *testing.T) {
 func TestConcurrentFileOperations(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
+	}
+	if os.Getenv("ANTHROPIC_BASE_URL") == "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
+		t.Skip("Set ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN to run this test")
 	}
 
 	// Create temporary directory for test
@@ -362,6 +371,9 @@ func TestConcurrentFileOperations(t *testing.T) {
 func TestComplexMultiTurnWithFiles(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping integration test")
+	}
+	if os.Getenv("ANTHROPIC_BASE_URL") == "" || os.Getenv("ANTHROPIC_AUTH_TOKEN") == "" {
+		t.Skip("Set ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN to run this test")
 	}
 
 	tempDir, err := os.MkdirTemp("", "claude-complex-test-*")
