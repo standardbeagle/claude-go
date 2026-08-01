@@ -1,0 +1,220 @@
+---
+title: Examples
+description: Five runnable Claude Go programs in the repository's examples/ directory.
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Every example below lives in the repository under `examples/` and can be run directly:
+
+```bash
+git clone https://github.com/standardbeagle/claude-go.git
+cd claude-go/examples/basic
+go run main.go
+```
+
+<CardGrid>
+  <Card title="Basic" icon="rocket">
+    `examples/basic/main.go` — create a client, fire a single query, and drain
+    `resp.Messages`/`resp.Errors` with a timeout.
+  </Card>
+  <Card title="Concurrent" icon="laptop">
+    `examples/concurrent/main.go` — run several prompts at once with a `sync.WaitGroup`, one
+    goroutine and message loop per prompt.
+  </Card>
+  <Card title="Interactive" icon="seti:shell">
+    `examples/interactive/main.go` — a REPL: type `new` for a fresh session, `quit` to exit,
+    anything else is sent to the current session via `session.SendMessage`.
+  </Card>
+  <Card title="Custom MCP Tools" icon="setting">
+    `examples/mcp/main.go` — a calculator built with `claude.Tool(...)`, registered as an
+    in-process MCP server and driven by a multi-step Claude prompt.
+  </Card>
+  <Card title="Hooks" icon="approve-check-circle">
+    `examples/hooks/main.go` — four hooks (tool-use logging, a dangerous-command blocker,
+    prompt context injection, and result logging) wired through a `HookRegistry`.
+  </Card>
+</CardGrid>
+
+## Basic
+
+One client, one query, a timeout-bounded read loop:
+
+```go
+client := claude.New(&claude.Options{
+	Debug:          true,
+	Verbose:        true,
+	PermissionMode: "bypassPermissions",
+})
+defer client.Close()
+
+resp, err := client.Query(ctx, &claude.QueryRequest{
+	Prompt: "Write a simple hello world function in Go",
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+fmt.Printf("Session ID: %s\n", resp.SessionID)
+
+go func() {
+	for err := range resp.Errors {
+		log.Printf("Error: %v", err)
+	}
+}()
+
+timeout := time.After(30 * time.Second)
+
+for {
+	select {
+	case msg, ok := <-resp.Messages:
+		if !ok {
+			return // channel closed, session done
+		}
+		fmt.Printf("[%s] %s: %s\n", msg.Timestamp.Format("15:04:05"), msg.Type, msg.Content)
+	case <-timeout:
+		return
+	}
+}
+```
+
+## Concurrent
+
+The same read loop, fanned out over a slice of prompts:
+
+```go
+var wg sync.WaitGroup
+
+for i, prompt := range prompts {
+	wg.Add(1)
+	go func(id int, p string) {
+		defer wg.Done()
+
+		resp, err := client.Query(ctx, &claude.QueryRequest{Prompt: p})
+		if err != nil {
+			log.Printf("Query %d failed: %v", id, err)
+			return
+		}
+
+		go func() {
+			for err := range resp.Errors {
+				log.Printf("Session %d error: %v", id, err)
+			}
+		}()
+
+		timeout := time.After(20 * time.Second)
+		for {
+			select {
+			case msg, ok := <-resp.Messages:
+				if !ok {
+					return
+				}
+				fmt.Printf("Session %d: %s\n", id, msg.Content)
+			case <-timeout:
+				return
+			}
+		}
+	}(i+1, prompt)
+}
+
+wg.Wait()
+```
+
+## Interactive
+
+A minimal `new` / `quit` REPL over one client, switching between creating a session and
+sending follow-up messages on the existing one via `client.GetSession`:
+
+```go
+if currentSession == nil {
+	resp, err := client.Query(ctx, &claude.QueryRequest{Prompt: input})
+	sessionID = resp.SessionID
+	session, _ := client.GetSession(sessionID)
+	currentSession = session
+
+	go func() {
+		for msg := range resp.Messages {
+			if msg.Type == "content" || msg.Type == "text" {
+				fmt.Printf("\nClaude: %s\n> ", msg.Content)
+			}
+		}
+	}()
+} else {
+	currentSession.SendMessage(input)
+}
+```
+
+## Custom MCP Tools
+
+Five calculator tools built with the `claude.Tool(...)` builder, registered as one SDK MCP
+server, then handed to Claude to compose:
+
+```go
+divideTool := claude.Tool("divide", "Divide one number by another").
+	Param("a", "number", "Dividend (number to divide)").
+	Param("b", "number", "Divisor (number to divide by)").
+	Required("a", "b").
+	Handler(func(ctx context.Context, args map[string]interface{}) (*claude.ToolResult, error) {
+		a := args["a"].(float64)
+		b := args["b"].(float64)
+		if b == 0 {
+			return claude.ErrorResult(fmt.Errorf("cannot divide by zero")), nil
+		}
+		return claude.TextResult(fmt.Sprintf("%.2f ÷ %.2f = %.2f", a, b, a/b)), nil
+	})
+
+calculator := claude.CreateSDKMCPServer("calculator", "1.0.0",
+	addTool, subtractTool, multiplyTool, divideTool, sqrtTool)
+
+client := claude.New(&claude.AgentOptions{
+	PermissionMode: claude.PermissionModeBypassPermission,
+	Interactive:    true,
+	AllowedTools: []string{
+		"mcp__calculator__add", "mcp__calculator__subtract",
+		"mcp__calculator__multiply", "mcp__calculator__divide", "mcp__calculator__sqrt",
+	},
+})
+client.RegisterSDKMCPServer("calculator", calculator)
+
+resp, _ := client.Query(ctx, &claude.QueryRequest{
+	Prompt: "Please calculate (15 + 7) * 3, then find the square root of the result.",
+})
+```
+
+Note the `.Handler(...)` vs `.HandlerFunc(...)` builder methods: `.Handler` returns a full
+`*claude.ToolResult` (so it can signal a tool-level error with `claude.ErrorResult` instead of
+a Go `error`), while `.HandlerFunc` is the simpler `(string, error)` form used by the other
+four tools in this example.
+
+## Hooks
+
+Four hooks registered against three lifecycle events:
+
+```go
+registry := claude.NewHookRegistry()
+
+registry.Register(claude.HookEventPreToolUse, []claude.HookMatcher{
+	{Matcher: "*", Hooks: []claude.HookCallback{logHook}},
+	{Matcher: "Bash", Hooks: []claude.HookCallback{bashBlocker}},
+})
+registry.Register(claude.HookEventUserPromptSubmit, []claude.HookMatcher{
+	{Matcher: "*", Hooks: []claude.HookCallback{contextAdder}},
+})
+registry.Register(claude.HookEventPostToolUse, []claude.HookMatcher{
+	{Matcher: "*", Hooks: []claude.HookCallback{resultLogger}},
+})
+
+client := claude.New(&claude.AgentOptions{
+	PermissionMode: claude.PermissionModeBypassPermission,
+	Interactive:    true,
+	Hooks:          registry,
+})
+```
+
+`bashBlocker` denies any `Bash` command matching a list of dangerous patterns (`rm -rf`,
+`sudo rm`, `dd if=`, a fork bomb, and writes to `/dev/sda`) by returning
+`PermissionDecision: claude.PermissionBehaviorDeny`. `contextAdder` runs on every
+`UserPromptSubmit` and injects a `HookOutput.Context` string ahead of the prompt.
+
+See [Core Concepts](/claude-go/core-concepts/) for how hooks and matchers fit together, or the
+[API Overview](/claude-go/api-reference/) for the full `HookInput`/`HookOutput` shapes.

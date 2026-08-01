@@ -1,0 +1,101 @@
+---
+title: Claude Go SDK
+description: A Go SDK for automating Claude Code CLI with concurrent session management, real-time streaming, custom tools, and hooks.
+template: splash
+head:
+  - tag: meta
+    attrs:
+      name: keywords
+      content: Claude, Claude Code, Go, SDK, automation, streaming, concurrent sessions, MCP, hooks
+  - tag: meta
+    attrs:
+      property: og:image:alt
+      content: Claude Go SDK — automate Claude Code CLI from Go
+  - tag: link
+    attrs:
+      rel: canonical
+      href: https://dev.standardbeagle.com/claude-go/
+hero:
+  tagline: Automate the Claude Code CLI from Go — concurrent sessions, real-time streaming, custom tools, hooks.
+  actions:
+    - text: Get Started
+      link: /claude-go/getting-started/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/standardbeagle/claude-go
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+## Why Claude Go?
+
+<CardGrid>
+  <Card title="One-shot or client-based" icon="rocket">
+    Call `claude.Query` for a single prompt, or build a `claude.Client` when you need sessions,
+    custom tools, and hooks. Same package, two altitudes.
+  </Card>
+  <Card title="Concurrent sessions" icon="laptop">
+    Run multiple Claude sessions at once with plain goroutines — the SDK is built around
+    channels, not a global lock.
+  </Card>
+  <Card title="Typed messages" icon="document">
+    Parse the CLI's `stream-json` output into `AssistantMessage`, `ToolUseBlock`,
+    `ResultMessage` and friends instead of hand-rolling JSON.
+  </Card>
+</CardGrid>
+
+## See it in action
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	claude "github.com/standardbeagle/claude-go"
+)
+
+func main() {
+	ctx := context.Background()
+
+	messages, err := claude.Query(ctx, "What is 2+2?", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, msg := range messages {
+		if text := claude.GetText(msg); text != "" {
+			fmt.Println(text)
+		}
+	}
+}
+```
+
+## What's in the box
+
+<CardGrid>
+  <Card title="Custom Tools (MCP)" icon="setting">
+    Define in-process MCP tools with the `claude.Tool(...)` builder — Claude calls straight
+    into your Go functions, no subprocess needed. [Core Concepts →](/claude-go/core-concepts/)
+  </Card>
+  <Card title="Hooks" icon="approve-check-circle">
+    Intercept `PreToolUse`, `PostToolUse`, and `UserPromptSubmit` events to allow, deny, or
+    annotate what Claude does. [Core Concepts →](/claude-go/core-concepts/)
+  </Card>
+  <Card title="Structured errors" icon="warning">
+    Typed errors — `CLINotFoundError`, `ProcessError`, `SessionClosedError`, `ToolError` — with
+    `Is*` helpers for precise handling. [API Overview →](/claude-go/api-reference/)
+  </Card>
+  <Card title="Streaming iterator" icon="magnifier">
+    `QueryIterator` gives you a channel-based or `Next()`-based loop over messages as they
+    arrive. [API Overview →](/claude-go/api-reference/)
+  </Card>
+</CardGrid>
+
+This is the Go equivalent of the
+[Python Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python).

@@ -1,0 +1,333 @@
+---
+title: API Overview
+description: Signatures for the client, sessions, message types, MCP tools, hooks, and errors in Claude Go.
+---
+
+Full generated documentation lives at
+[pkg.go.dev/github.com/standardbeagle/claude-go](https://pkg.go.dev/github.com/standardbeagle/claude-go).
+This page groups the exported surface by concept, with the real signatures from
+[`claude.go`](https://github.com/standardbeagle/claude-go/blob/main/claude.go),
+[`types.go`](https://github.com/standardbeagle/claude-go/blob/main/types.go),
+[`mcp.go`](https://github.com/standardbeagle/claude-go/blob/main/mcp.go),
+[`hooks.go`](https://github.com/standardbeagle/claude-go/blob/main/hooks.go), and
+[`errors.go`](https://github.com/standardbeagle/claude-go/blob/main/errors.go).
+
+## Package-level functions
+
+```go
+func Query(ctx context.Context, prompt string, opts *AgentOptions) ([]MessageType, error)
+func NewQueryIterator(ctx context.Context, prompt string, opts *AgentOptions) (*QueryIterator, error)
+func New(opts *AgentOptions) *Client
+
+func ParseMessage(raw json.RawMessage) (MessageType, error)
+func ParseContentBlock(raw json.RawMessage) (ContentBlock, error)
+func ParseContentBlocks(raw json.RawMessage) ([]ContentBlock, error)
+func GetText(msg MessageType) string
+func GetToolCalls(msg AssistantMessage) []ToolUseBlock
+```
+
+## Client and Session
+
+```go
+type Client struct{ /* ... */ }
+
+func (c *Client) RegisterMCPServer(name string, config MCPServerConfig)
+func (c *Client) RegisterSDKMCPServer(name string, server *SDKMCPServer)
+func (c *Client) Query(ctx context.Context, req *QueryRequest) (*QueryResponse, error)
+func (c *Client) GetSession(sessionID string) (*Session, bool)
+func (c *Client) CloseSession(sessionID string) error
+func (c *Client) Close() error
+
+type Session struct{ /* ... */ }
+
+func (s *Session) SendMessage(content string) error
+func (s *Session) Close() error
+func (s *Session) Wait() error
+```
+
+```go
+type QueryRequest struct {
+	Prompt    string
+	SessionID string
+	// ...
+}
+
+type QueryResponse struct {
+	SessionID string
+	Messages  <-chan Message
+	Errors    <-chan error
+	// ...
+}
+```
+
+## QueryIterator
+
+```go
+type QueryIterator struct{ /* ... */ }
+
+func (q *QueryIterator) Next() (MessageType, error)
+func (q *QueryIterator) Close() error
+func (q *QueryIterator) Messages() <-chan MessageType
+func (q *QueryIterator) Errors() <-chan error
+```
+
+## AgentOptions
+
+`Options` is a type alias (`type Options = AgentOptions`) kept for backward compatibility —
+both names are interchangeable.
+
+```go
+type AgentOptions struct {
+	// API Authentication
+	APIKey      string
+	AccessToken string
+
+	// API Endpoint Configuration
+	BaseURL string
+
+	// Provider Selection (anthropic, bedrock, vertex)
+	Provider APIProvider
+
+	// Model configuration
+	Model             string
+	SmallFastModel    string // Haiku-class model
+	BigModel          string // Opus-class model
+	MaxThinkingTokens int
+	MaxTokens         int
+
+	// System prompt
+	SystemPrompt string
+
+	// Tool configuration
+	AllowedTools    []string
+	DisallowedTools []string
+
+	// Permission handling
+	PermissionMode PermissionMode
+
+	// Resource limits
+	MaxTurns     int
+	MaxBudgetUSD float64
+	TimeoutSecs  int
+
+	// Session management
+	Resume               string
+	ContinueConversation bool
+	ForkSession          string
+
+	// MCP servers
+	MCPServers    MCPServers
+	MCPConfigPath string
+
+	// Hooks
+	Hooks *HookRegistry
+
+	// Plugins
+	Plugins map[string]SDKPluginConfig
+
+	// Agent definitions
+	Agents map[string]AgentDefinition
+
+	// Sandbox settings
+	Sandbox *SandboxSettings
+
+	// File management
+	FileCheckpoints  bool
+	AddDirectories   []string
+	WorkingDirectory string
+
+	// AWS Bedrock / Google Vertex / Proxy configuration
+	Bedrock *BedrockConfig
+	Vertex  *VertexConfig
+	Proxy   *ProxyConfig
+
+	// Environment variables passed to the CLI subprocess
+	Environment map[string]string
+
+	// CLI configuration
+	CLIPath string
+
+	// Behavior flags
+	Debug       bool
+	Verbose     bool
+	NoTelemetry bool
+	SkipOAuth   bool
+
+	// Output configuration (text, json, stream-json)
+	OutputFormat string
+
+	// Legacy: Interactive mode (for backward compatibility)
+	Interactive bool
+}
+```
+
+`PermissionMode` is a string type with named constants such as
+`claude.PermissionModeBypassPermission`; see `types.go` for the full set.
+
+## Message types
+
+```go
+type MessageType interface{ messageType() }
+
+type UserMessage struct{ /* ... */ }
+type AssistantMessage struct {
+	Content []ContentBlock
+	Model   string
+	// ...
+}
+type SystemMessage struct {
+	Subtype string // "init", "hook_started", "hook_response", ...
+	// ...
+}
+type ResultMessage struct {
+	SessionID    string
+	DurationMS   int
+	Result       string
+	TotalCostUSD float64
+	NumTurns     int
+	Usage        Usage
+	// ...
+}
+type StreamEvent struct{ /* ... */ }
+```
+
+## Content blocks
+
+```go
+type ContentBlock interface{ contentBlock() }
+
+type TextBlock struct {
+	Text string
+	// ...
+}
+type ThinkingBlock struct{ /* ... */ }
+type ToolUseBlock struct {
+	ID    string
+	Name  string
+	Input map[string]interface{}
+}
+type ToolResultBlock struct {
+	ToolUseID string
+	Content   any
+	IsError   bool
+}
+```
+
+| Type | Description |
+|------|-------------|
+| `SystemMessage` | System events: `init`, `hook_started`, `hook_response` |
+| `AssistantMessage` | Claude's response with content blocks |
+| `UserMessage` | User input or tool results |
+| `ResultMessage` | Final summary: session ID, cost, duration, token usage |
+| `StreamEvent` | Raw streaming events |
+| `TextBlock` | Plain text response |
+| `ThinkingBlock` | Extended thinking (internal reasoning) |
+| `ToolUseBlock` | Tool invocation with name, ID, and input |
+| `ToolResultBlock` | Tool execution result |
+
+## Custom tools (MCP)
+
+```go
+func Tool(name, description string) *ToolBuilder
+
+func (b *ToolBuilder) Param(name, paramType, description string) *ToolBuilder
+func (b *ToolBuilder) ParamWithEnum(name, paramType, description string, enum []string) *ToolBuilder
+func (b *ToolBuilder) ParamWithDefault(name, paramType, description string, defaultVal any) *ToolBuilder
+func (b *ToolBuilder) Required(names ...string) *ToolBuilder
+func (b *ToolBuilder) Handler(handler ToolHandler) *ToolDefinition
+func (b *ToolBuilder) HandlerFunc(fn func(ctx context.Context, args map[string]interface{}) (string, error)) *ToolDefinition
+
+type ToolHandler func(ctx context.Context, args map[string]interface{}) (*ToolResult, error)
+
+func TextResult(text string) *ToolResult
+func ErrorResult(err error) *ToolResult
+func ImageResult(data string, mimeType string) *ToolResult
+
+func NewSDKMCPServer(name, version string) *SDKMCPServer
+func CreateSDKMCPServer(name, version string, tools ...*ToolDefinition) *SDKMCPServer
+
+func (s *SDKMCPServer) RegisterTool(tool *ToolDefinition)
+func (s *SDKMCPServer) GetTool(name string) (*ToolDefinition, bool)
+func (s *SDKMCPServer) ListTools() []*ToolDefinition
+func (s *SDKMCPServer) ExecuteTool(ctx context.Context, name string, args map[string]interface{}) (*ToolResult, error)
+```
+
+## Hooks
+
+```go
+type HookEvent string // HookEventPreToolUse, HookEventPostToolUse, HookEventUserPromptSubmit, ...
+
+type HookCallback func(ctx context.Context, input HookInput, toolUseID string, hookCtx HookContext) (*HookOutput, error)
+
+type HookMatcher struct {
+	Matcher string // "*" or an exact tool name
+	Hooks   []HookCallback
+}
+
+type HookRegistry struct{ /* ... */ }
+
+func NewHookRegistry() *HookRegistry
+func (r *HookRegistry) Register(event HookEvent, matchers []HookMatcher)
+func (r *HookRegistry) GetMatchers(event HookEvent) []HookMatcher
+func (r *HookRegistry) ExecuteHooks(ctx context.Context, event HookEvent, input HookInput, toolUseID string, hookCtx HookContext) (*HookOutput, error)
+
+type HookInput interface{ hookInput() }
+
+type PreToolUseInput struct {
+	ToolName  string
+	ToolInput map[string]interface{}
+	// ...
+}
+type PostToolUseInput struct {
+	ToolName string
+	IsError  bool
+	// ...
+}
+type UserPromptSubmitInput struct{ /* ... */ }
+type StopInput struct{ /* ... */ }
+type SubagentStopInput struct{ /* ... */ }
+type PreCompactInput struct{ /* ... */ }
+
+type HookOutput struct {
+	PermissionDecision       PermissionBehavior // e.g. PermissionBehaviorDeny
+	PermissionDecisionReason string
+	Context                  string
+	// ...
+}
+```
+
+Convenience constructors for common hook shapes:
+
+```go
+func DenyTool(reason string) HookCallback
+func AllowTool() HookCallback
+func StopExecution(reason string) HookCallback
+func AddContext(contextStr string) HookCallback
+```
+
+## Errors
+
+```go
+type ClaudeSDKError struct{ /* ... */ }    // base error type
+type CLINotFoundError struct{ /* ... */ }  // Claude CLI not installed
+type CLIConnectionError struct{ /* ... */ }
+type ProcessError struct{ /* ... */ }      // CLI process failures
+type CLIJSONDecodeError struct{ /* ... */ }
+type MessageParseError struct{ /* ... */ }
+type SessionClosedError struct{ /* ... */ } // using a closed session
+type ToolError struct{ /* ... */ }          // tool execution failures
+type HookError struct{ /* ... */ }          // hook execution failures
+
+func IsCLINotFound(err error) bool
+func IsCLIConnectionError(err error) bool
+func IsProcessError(err error) bool
+func IsJSONDecodeError(err error) bool
+func IsMessageParseError(err error) bool
+func IsSessionClosedError(err error) bool
+func IsToolError(err error) bool
+func IsHookError(err error) bool
+```
+
+Each error type also has an `Is*` predicate and (where applicable) a `New*Error(...)`
+constructor — see [`errors.go`](https://github.com/standardbeagle/claude-go/blob/main/errors.go)
+for the full constructors and wrapped-error (`Unwrap`) behavior.

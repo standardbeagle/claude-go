@@ -1,0 +1,132 @@
+---
+title: Getting Started
+description: Install Claude Go and run your first query against the Claude Code CLI.
+---
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+## Prerequisites
+
+- **Go 1.21 or later**
+- **Claude CLI** installed and accessible on `PATH`
+- Valid Claude authentication (see below)
+
+Claude Go drives the `claude` CLI as a subprocess — it does not talk to the Anthropic API
+directly. Install the CLI first:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+## Installation
+
+```bash
+go get github.com/standardbeagle/claude-go
+```
+
+## Authentication
+
+<Steps>
+
+1. Authenticate the CLI once, interactively:
+
+   ```bash
+   claude setup-token
+   ```
+
+2. Or set an API key in the environment the SDK's subprocess will inherit:
+
+   ```bash
+   export ANTHROPIC_API_KEY=your-api-key
+   ```
+
+</Steps>
+
+## Your first query
+
+The simplest way to call Claude is the package-level `Query` function — no client or session
+setup required:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	claude "github.com/standardbeagle/claude-go"
+)
+
+func main() {
+	ctx := context.Background()
+
+	messages, err := claude.Query(ctx, "What is 2+2?", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for _, msg := range messages {
+		if text := claude.GetText(msg); text != "" {
+			fmt.Println(text)
+		}
+	}
+}
+```
+
+Run it:
+
+```bash
+go run main.go
+```
+
+## Client-based usage
+
+Once you need sessions, custom tools, or hooks, create a `claude.Client`:
+
+```go
+client := claude.New(&claude.AgentOptions{
+	PermissionMode: claude.PermissionModeBypassPermission,
+	Model:          "sonnet",
+})
+defer client.Close()
+
+resp, err := client.Query(ctx, &claude.QueryRequest{
+	Prompt: "Write a hello world function in Go",
+})
+if err != nil {
+	log.Fatal(err)
+}
+
+for msg := range resp.Messages {
+	fmt.Printf("%s: %s\n", msg.Type, msg.Content)
+}
+```
+
+`claude.Options` is a type alias for `claude.AgentOptions`, kept for backward compatibility —
+both names refer to the same struct.
+
+<Aside type="tip">
+  `client.Query` returns a `*QueryResponse` with `Messages` and `Errors` channels. Drain
+  `Errors` in a separate goroutine so a slow consumer doesn't block the session — see the
+  [Core Concepts](/claude-go/core-concepts/) page for the full pattern.
+</Aside>
+
+## CLI discovery
+
+If `claude` is not on `PATH`, the SDK looks in this order:
+
+1. `CLAUDE_CLI_PATH` environment variable
+2. Current working directory
+3. System `PATH`
+4. Common installation locations (npm, yarn, homebrew)
+
+Set `AgentOptions.CLIPath` to point at a specific binary, or `CLAUDE_CLI_PATH` to override
+discovery entirely.
+
+## Next steps
+
+- [Core Concepts](/claude-go/core-concepts/) — sessions, streaming, tools, and hooks
+- [Examples](/claude-go/examples/) — five runnable programs in the repo's `examples/` directory
+- [API Overview](/claude-go/api-reference/) — the full surface of `AgentOptions`, message types,
+  and error types

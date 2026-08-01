@@ -1,0 +1,270 @@
+---
+title: Core Concepts
+description: Sessions, streaming, custom MCP tools, hooks, and error handling in Claude Go.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Sessions
+
+A `claude.Client` manages one Claude CLI subprocess per session. `client.Query` either creates
+a new session or reuses one identified by `QueryRequest.SessionID`.
+
+```go
+client := claude.New(&claude.AgentOptions{
+	PermissionMode: claude.PermissionModeBypassPermission,
+	Interactive:    true,
+})
+
+resp, _ := client.Query(ctx, &claude.QueryRequest{
+	Prompt:    "My name is Alice. Remember this.",
+	SessionID: "my-session",
+})
+
+// Continue the conversation on the same session.
+session, _ := client.GetSession("my-session")
+session.SendMessage("What is my name?")
+```
+
+`client.GetSession(id)` returns the underlying `*claude.Session`, which exposes
+`SendMessage`, `Close`, and `Wait`. `client.CloseSession(id)` and `client.Close()` tear down
+one session or all of them.
+
+### Concurrent sessions
+
+Sessions are independent goroutine-safe subprocesses, so running several at once is just
+`sync.WaitGroup` over `client.Query` calls:
+
+```go
+var wg sync.WaitGroup
+
+for _, prompt := range prompts {
+	wg.Add(1)
+	go func(p string) {
+		defer wg.Done()
+		resp, _ := client.Query(ctx, &claude.QueryRequest{Prompt: p})
+		for msg := range resp.Messages {
+			fmt.Println(msg.Content)
+		}
+	}(prompt)
+}
+
+wg.Wait()
+```
+
+Multiple goroutines can create sessions concurrently, and any given session can be safely
+accessed from multiple goroutines. `client.Close()` shuts every session down and
+context cancellation propagates cleanup.
+
+## Streaming
+
+`client.Query` returns a `*QueryResponse` with two channels:
+
+```go
+type QueryResponse struct {
+	SessionID string
+	Messages  <-chan Message
+	Errors    <-chan error
+	// ...
+}
+```
+
+Drain both concurrently — `Errors` in its own goroutine so a slow message consumer never
+blocks error delivery:
+
+```go
+resp, err := client.Query(ctx, &claude.QueryRequest{Prompt: "..."})
+if err != nil {
+	log.Fatal(err)
+}
+
+go func() {
+	for err := range resp.Errors {
+		log.Printf("Error: %v", err)
+	}
+}()
+
+for msg := range resp.Messages {
+	fmt.Printf("[%s] %s: %s\n", msg.Timestamp.Format("15:04:05"), msg.Type, msg.Content)
+}
+```
+
+### QueryIterator
+
+For lower-level streaming — typed `MessageType` values straight from the CLI's
+`stream-json` output — use `NewQueryIterator`:
+
+```go
+iter, err := claude.NewQueryIterator(ctx, "Fix the bug in main.go", &claude.AgentOptions{
+	PermissionMode: claude.PermissionModeBypassPermission,
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer iter.Close()
+
+for {
+	select {
+	case msg, ok := <-iter.Messages():
+		if !ok {
+			return // done
+		}
+		switch m := msg.(type) {
+		case claude.AssistantMessage:
+			if text := claude.GetText(m); text != "" {
+				fmt.Print(text)
+			}
+		case claude.ResultMessage:
+			fmt.Printf("\nSession: %s, Cost: $%.4f\n", m.SessionID, m.TotalCostUSD)
+			return
+		}
+	case err := <-iter.Errors():
+		log.Printf("Error: %v", err)
+	}
+}
+```
+
+Or pull messages one at a time with `iter.Next()`, which returns `nil, nil` when the stream
+ends.
+
+### Stream-JSON wire format
+
+The CLI's `--output-format stream-json` produces JSONL — one JSON object per line, with
+content nested under a `message` key for assistant and user messages:
+
+```jsonl
+{"type":"system","subtype":"init","session_id":"abc-123"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello!"}],"model":"claude-sonnet-4-20250514"}}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu_1","name":"Read","input":{"file_path":"main.go"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_1","content":"package main..."}]}}
+{"type":"result","session_id":"abc-123","duration_ms":5000,"result":"Done.","total_cost_usd":0.05}
+```
+
+`claude.ParseMessage` handles this nested format automatically, extracting `message.content`
+into `AssistantMessage.Content` / `UserMessage.Content`.
+
+## Structured message types
+
+```go
+msg, err := claude.ParseMessage(jsonData)
+
+switch m := msg.(type) {
+case claude.AssistantMessage:
+	for _, block := range m.Content {
+		switch b := block.(type) {
+		case claude.TextBlock:
+			fmt.Println(b.Text)
+		case claude.ToolUseBlock:
+			fmt.Printf("Tool: %s(%v)\n", b.Name, b.Input)
+		case claude.ThinkingBlock:
+			// Claude's internal reasoning (extended thinking)
+		case claude.ToolResultBlock:
+			// Result from a tool execution
+		}
+	}
+case claude.SystemMessage:
+	fmt.Printf("System: %s\n", m.Subtype) // "init", "hook_started", "hook_response", ...
+case claude.ResultMessage:
+	fmt.Printf("Cost: $%.4f, Turns: %d\n", m.TotalCostUSD, m.NumTurns)
+	fmt.Println(m.Result)
+case claude.StreamEvent:
+	// Raw streaming events (partial content deltas)
+}
+```
+
+See the [API Overview](/claude-go/api-reference/) for the full list of message and content
+block types.
+
+## Custom tools (in-process MCP servers)
+
+Define tools Claude can call using the `claude.Tool(name, description)` builder, then register
+an SDK MCP server on the client:
+
+```go
+addTool := claude.Tool("add", "Add two numbers").
+	Param("a", "number", "First number").
+	Param("b", "number", "Second number").
+	Required("a", "b").
+	HandlerFunc(func(ctx context.Context, args map[string]interface{}) (string, error) {
+		a := args["a"].(float64)
+		b := args["b"].(float64)
+		return fmt.Sprintf("%g", a+b), nil
+	})
+
+server := claude.CreateSDKMCPServer("calculator", "1.0.0", addTool)
+
+client := claude.New(&claude.AgentOptions{
+	PermissionMode: claude.PermissionModeBypassPermission,
+	AllowedTools:   []string{"mcp__calculator__add"},
+})
+client.RegisterSDKMCPServer("calculator", server)
+```
+
+Tool names must be added to `AllowedTools` as `mcp__<server>__<tool>` or Claude won't be
+permitted to call them. Use `.Handler(...)` instead of `.HandlerFunc(...)` when you need full
+control over the result — `claude.TextResult(...)` and `claude.ErrorResult(...)` build a
+`*claude.ToolResult` directly, which is useful for signaling tool-level failures (e.g.
+division by zero) without returning a Go `error`.
+
+## Hooks
+
+Hooks intercept lifecycle events — `PreToolUse`, `PostToolUse`, `UserPromptSubmit` — and can
+allow, deny, or annotate what happens next:
+
+```go
+bashBlocker := func(ctx context.Context, input claude.HookInput, toolUseID string, hookCtx claude.HookContext) (*claude.HookOutput, error) {
+	if preInput, ok := input.(claude.PreToolUseInput); ok {
+		if cmd, ok := preInput.ToolInput["command"].(string); ok {
+			if strings.Contains(cmd, "rm -rf") {
+				return &claude.HookOutput{
+					PermissionDecision:       claude.PermissionBehaviorDeny,
+					PermissionDecisionReason: "Dangerous command blocked",
+				}, nil
+			}
+		}
+	}
+	return nil, nil // nil output = allow, unchanged
+}
+
+registry := claude.NewHookRegistry()
+registry.Register(claude.HookEventPreToolUse, []claude.HookMatcher{
+	{Matcher: "Bash", Hooks: []claude.HookCallback{bashBlocker}},
+})
+
+client := claude.New(&claude.AgentOptions{
+	Hooks: registry,
+})
+```
+
+`Matcher` is either `"*"` (every tool) or an exact tool name (e.g. `"Bash"`). A hook returning
+`nil, nil` allows the event through unchanged; returning a `*HookOutput` with
+`PermissionDecision: claude.PermissionBehaviorDeny` blocks it. `UserPromptSubmit` hooks can
+instead set `HookOutput.Context` to inject additional context ahead of the prompt.
+
+## Error handling
+
+Every failure mode has a typed error plus an `Is*` predicate:
+
+```go
+resp, err := client.Query(ctx, req)
+if err != nil {
+	switch {
+	case claude.IsCLINotFound(err):
+		log.Fatal("Install Claude CLI: npm install -g @anthropic-ai/claude-code")
+	case claude.IsProcessError(err):
+		log.Fatal("CLI process failed")
+	case claude.IsCLIConnectionError(err):
+		log.Fatal("Connection error")
+	default:
+		log.Fatal(err)
+	}
+}
+```
+
+<Aside type="caution">
+  `client.Close()` and `session.Close()` are idempotent cleanup calls — always `defer`
+  `client.Close()` right after `claude.New(...)`, even in code paths that error out early.
+</Aside>
+
+Continue to [Examples](/claude-go/examples/) for complete, runnable programs, or the
+[API Overview](/claude-go/api-reference/) for the full type reference.
