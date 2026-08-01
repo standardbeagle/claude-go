@@ -11,22 +11,14 @@ export default defineConfig({
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/standardbeagle/claude-go' },
       ],
+      // Per-page og:title / og:description / og:url live in each page's own
+      // frontmatter `head` (see src/content/docs/*.mdx) so social previews
+      // reflect the page being shared, not always the homepage. Only the
+      // tags that are genuinely the same on every page belong here.
       head: [
         {
           tag: 'meta',
-          attrs: { property: 'og:title', content: 'Claude Go SDK' },
-        },
-        {
-          tag: 'meta',
-          attrs: { property: 'og:description', content: 'A Go SDK for automating Claude Code CLI with concurrent session management, real-time streaming, custom tools, and hooks.' },
-        },
-        {
-          tag: 'meta',
           attrs: { property: 'og:type', content: 'website' },
-        },
-        {
-          tag: 'meta',
-          attrs: { property: 'og:url', content: 'https://dev.standardbeagle.com/claude-go/' },
         },
         {
           tag: 'meta',

@@ -1,6 +1,6 @@
 ---
-title: Claude Go SDK
-description: A Go SDK for automating Claude Code CLI with concurrent session management, real-time streaming, custom tools, and hooks.
+title: Automate the Claude Code CLI from Go
+description: "A Go SDK for automating the Claude Code CLI: concurrent sessions, real-time streaming, custom in-process MCP tools, and lifecycle hooks for building agents."
 template: splash
 head:
   - tag: meta
@@ -9,12 +9,16 @@ head:
       content: Claude, Claude Code, Go, SDK, automation, streaming, concurrent sessions, MCP, hooks
   - tag: meta
     attrs:
-      property: og:image:alt
-      content: Claude Go SDK — automate Claude Code CLI from Go
-  - tag: link
+      property: og:title
+      content: Automate the Claude Code CLI from Go | Claude Go SDK
+  - tag: meta
     attrs:
-      rel: canonical
-      href: https://dev.standardbeagle.com/claude-go/
+      property: og:description
+      content: "A Go SDK for automating the Claude Code CLI: concurrent sessions, real-time streaming, custom in-process MCP tools, and lifecycle hooks for building agents."
+  - tag: meta
+    attrs:
+      property: og:url
+      content: https://dev.standardbeagle.com/claude-go/
 hero:
   tagline: Automate the Claude Code CLI from Go — concurrent sessions, real-time streaming, custom tools, hooks.
   actions:
@@ -96,6 +100,9 @@ func main() {
     arrive. [API Overview →](/claude-go/api-reference/)
   </Card>
 </CardGrid>
+
+See [Examples](/claude-go/examples/) for five complete, runnable programs, or jump straight to
+[Getting Started](/claude-go/getting-started/).
 
 This is the Go equivalent of the
 [Python Claude Agent SDK](https://github.com/anthropics/claude-agent-sdk-python).

@@ -1,6 +1,19 @@
 ---
-title: API Overview
-description: Signatures for the client, sessions, message types, MCP tools, hooks, and errors in Claude Go.
+title: "API Overview: Types, Functions, and Errors"
+description: Exported functions, types, and constants of the Claude Go SDK — client and session, message and content-block types, the MCP tool builder, hooks, and errors.
+head:
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "API Overview: Types, Functions, and Errors | Claude Go SDK"
+  - tag: meta
+    attrs:
+      property: og:description
+      content: Exported functions, types, and constants of the Claude Go SDK — client and session, message and content-block types, the MCP tool builder, hooks, and errors.
+  - tag: meta
+    attrs:
+      property: og:url
+      content: https://dev.standardbeagle.com/claude-go/api-reference/
 ---
 
 Full generated documentation lives at
@@ -332,3 +345,6 @@ func IsHookError(err error) bool
 Each error type also has an `Is*` predicate and (where applicable) a `New*Error(...)`
 constructor — see [`errors.go`](https://github.com/standardbeagle/claude-go/blob/main/errors.go)
 for the full constructors and wrapped-error (`Unwrap`) behavior.
+
+See [Core Concepts](/claude-go/core-concepts/) for how these types fit together in a running
+session, or [Examples](/claude-go/examples/) for complete, runnable programs that use them.
