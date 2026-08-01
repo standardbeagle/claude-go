@@ -54,8 +54,8 @@ type QueryRequest struct {
 
 type QueryResponse struct {
 	SessionID string
-	Messages  <-chan Message
-	Errors    <-chan error
+	Messages  chan *Message
+	Errors    chan error
 	// ...
 }
 ```
@@ -181,11 +181,11 @@ type SystemMessage struct {
 }
 type ResultMessage struct {
 	SessionID    string
-	DurationMS   int
+	DurationMS   int64
 	Result       string
 	TotalCostUSD float64
 	NumTurns     int
-	Usage        Usage
+	Usage        *Usage
 	// ...
 }
 type StreamEvent struct{ /* ... */ }
@@ -208,7 +208,7 @@ type ToolUseBlock struct {
 }
 type ToolResultBlock struct {
 	ToolUseID string
-	Content   any
+	Content   string
 	IsError   bool
 }
 ```
@@ -260,8 +260,9 @@ type HookEvent string // HookEventPreToolUse, HookEventPostToolUse, HookEventUse
 type HookCallback func(ctx context.Context, input HookInput, toolUseID string, hookCtx HookContext) (*HookOutput, error)
 
 type HookMatcher struct {
-	Matcher string // "*" or an exact tool name
-	Hooks   []HookCallback
+	Matcher   string // "*" or an exact tool name
+	Hooks     []HookCallback
+	TimeoutMS int // 0 uses the default timeout
 }
 
 type HookRegistry struct{ /* ... */ }

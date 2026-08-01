@@ -63,8 +63,8 @@ context cancellation propagates cleanup.
 ```go
 type QueryResponse struct {
 	SessionID string
-	Messages  <-chan Message
-	Errors    <-chan error
+	Messages  chan *Message
+	Errors    chan error
 	// ...
 }
 ```
