@@ -48,3 +48,6 @@ debug/
 *_debug.go
 simple_*.go
 direct_*.go
+# tman shims
+/test
+/test.cmd
